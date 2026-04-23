@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"hash/fnv"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -49,6 +50,68 @@ type Config struct {
 	ITermTabColor    string `toml:"iterm_tab_color"`
 	PlanningContext  string `toml:"planning_context"`
 	DispatchMode     string `toml:"dispatch_mode"`
+	ID               string `toml:"id"`
+}
+
+// ConfigID returns the effective identifier for the config at configPath.
+// If the config's "id" field is set, that value is returned. Otherwise the
+// identifier is the shortest prefix of the filename stem (≥5 chars) that is
+// unique among all .toml files in ~/.clorchestrate/.
+func ConfigID(configPath string) (string, error) {
+	cfg, err := Parse(configPath)
+	if err != nil {
+		return "", err
+	}
+	if cfg.ID != "" {
+		return cfg.ID, nil
+	}
+
+	stem := strings.TrimSuffix(filepath.Base(configPath), ".toml")
+
+	allStems := configDirStems()
+
+	minLen := 5
+	if len(stem) < minLen {
+		minLen = len(stem)
+	}
+	for n := minLen; n <= len(stem); n++ {
+		prefix := stem[:n]
+		conflict := false
+		for _, other := range allStems {
+			if other == stem {
+				continue
+			}
+			if strings.HasPrefix(other, prefix) {
+				conflict = true
+				break
+			}
+		}
+		if !conflict {
+			return prefix, nil
+		}
+	}
+	return stem, nil
+}
+
+// configDirStems returns the filename stems (without .toml extension) of all
+// .toml files in ~/.clorchestrate/. Returns an empty slice if the directory
+// does not exist or cannot be read.
+func configDirStems() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	entries, err := os.ReadDir(filepath.Join(home, ".clorchestrate"))
+	if err != nil {
+		return nil
+	}
+	var stems []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".toml") {
+			stems = append(stems, strings.TrimSuffix(e.Name(), ".toml"))
+		}
+	}
+	return stems
 }
 
 func Parse(path string) (*Config, error) {
