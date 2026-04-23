@@ -45,7 +45,7 @@ fi
 if [[ -n "$POST_SETUP_CMD" ]]; then
   echo "Running post-setup: $POST_SETUP_CMD"
   cd "$WORKTREE_DIR"
-  eval "$POST_SETUP_CMD"
+  bash -ic "$POST_SETUP_CMD"
 fi
 
 echo ""
