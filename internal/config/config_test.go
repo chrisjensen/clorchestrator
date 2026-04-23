@@ -9,7 +9,7 @@ import (
 func writeTemp(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "test.conf")
+	path := filepath.Join(dir, "test.toml")
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -18,15 +18,15 @@ func writeTemp(t *testing.T, content string) string {
 
 func TestParse_AllKeys(t *testing.T) {
 	path := writeTemp(t, `
-DISPATCH_SERVER=myserver
-DISPATCH_REMOTE_REPO=~/src/myrepo
-DISPATCH_ISSUE_REPO=org/issues
-DISPATCH_BRANCH_REPO=org/branches
-DISPATCH_DEFAULT_BASE=develop
-DISPATCH_BRANCH_NAME_FORMAT=feature/{issue}-{handle}
-DISPATCH_POST_SETUP_CMD="npm run build"
-DISPATCH_ITERM_TAB_COLOR="#f4b6cf"
-DISPATCH_PLANNING_CONTEXT="some context"
+server = "myserver"
+remote_repo = "~/src/myrepo"
+issue_repo = "org/issues"
+branch_repo = "org/branches"
+default_base = "develop"
+branch_name_format = "feature/{issue}-{handle}"
+post_setup_cmd = "npm run build"
+iterm_tab_color = "#f4b6cf"
+planning_context = "some context"
 `)
 	cfg, err := Parse(path)
 	if err != nil {
@@ -61,27 +61,60 @@ DISPATCH_PLANNING_CONTEXT="some context"
 	}
 }
 
-func TestParse_QuotedValues(t *testing.T) {
+func TestParse_MultilineValue(t *testing.T) {
 	path := writeTemp(t, `
-DISPATCH_SERVER="my server"
-DISPATCH_ITERM_TAB_COLOR='#FF8800'
+server = "myserver"
+planning_context = """
+line one
+
+line two"""
 `)
 	cfg, err := Parse(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Server != "my server" {
-		t.Errorf("Server = %q, want 'my server'", cfg.Server)
+	if cfg.Server != "myserver" {
+		t.Errorf("Server = %q, want myserver", cfg.Server)
 	}
-	if cfg.ITermTabColor != "#FF8800" {
-		t.Errorf("ITermTabColor = %q", cfg.ITermTabColor)
+	want := "line one\n\nline two"
+	if cfg.PlanningContext != want {
+		t.Errorf("PlanningContext = %q, want %q", cfg.PlanningContext, want)
+	}
+}
+
+func TestResolveTabColor(t *testing.T) {
+	for _, suppress := range []string{"none", "no", "false", "None", "NO", "FALSE"} {
+		if got := ResolveTabColor(suppress, "/any/path.toml"); got != "" {
+			t.Errorf("ResolveTabColor(%q, ...) = %q, want empty", suppress, got)
+		}
+	}
+
+	if got := ResolveTabColor("#aabbcc", "/any/path.toml"); got != "#aabbcc" {
+		t.Errorf("ResolveTabColor passthrough = %q, want #aabbcc", got)
+	}
+
+	// Deterministic: same path always yields the same color.
+	c1 := ResolveTabColor("", "/some/project.toml")
+	c2 := ResolveTabColor("", "/some/project.toml")
+	if c1 != c2 {
+		t.Errorf("ResolveTabColor not deterministic: %q != %q", c1, c2)
+	}
+	if c1 == "" {
+		t.Error("ResolveTabColor returned empty for unset value")
+	}
+
+	// Different filenames should (in practice) produce different colors.
+	cA := ResolveTabColor("", "/a/alpha.toml")
+	cB := ResolveTabColor("", "/b/beta.toml")
+	if cA == cB {
+		t.Logf("ResolveTabColor: alpha.toml and beta.toml both mapped to %q (hash collision, not a bug)", cA)
 	}
 }
 
 func TestParse_DefaultsAndComments(t *testing.T) {
 	path := writeTemp(t, `
 # A comment
-DISPATCH_SERVER=myserver
+server = "myserver"
 
 # Another comment
 `)

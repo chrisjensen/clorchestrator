@@ -1,0 +1,26 @@
+# Dispatch config for bitmark-extractor-ai
+# Copy to ~/.dispatch/bitmark-extractor-ai.toml and fill in real values
+
+server = "myserver"
+remote_repo = "~/src/ncoderz/bitmark-extractor-ai"
+issue_repo = "getMoreBrain/cosmic"
+branch_repo = "getMoreBrain/bitmark-extractor-ai"
+default_base = "main"
+
+# Branch naming strategy:
+# Empty = GitHub auto-generates the branch name (default, matches GitHub UI behaviour)
+# Set with {issue} and/or {handle} tokens to enforce a format via --name
+# Example: branch_name_format = "feature/{issue}-{handle}"
+branch_name_format = ""
+
+# Command to run in the new worktree after node_modules copy. Empty = skip.
+post_setup_cmd = "npm run build"
+
+# iTerm2 tab color (optional). Sets the tab's color when dispatch opens a new tab.
+# Format: "#RRGGBB". Use "none" to suppress.
+iterm_tab_color = "#f4b6cf"
+
+# Context injected into the planning prompt for every task in this repo.
+# Describe the codebase, key patterns, and anything Claude should know upfront.
+# Use triple-quotes for multi-line values.
+planning_context = ""

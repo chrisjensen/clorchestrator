@@ -1,83 +1,60 @@
 package config
 
 import (
-	"bufio"
 	"fmt"
-	"os"
+	"hash/fnv"
+	"path/filepath"
 	"strings"
+
+	"github.com/BurntSushi/toml"
 )
 
+// defaultTabColors is the palette used when iterm_tab_color is unset.
+var defaultTabColors = []string{
+	"#4a9eff",
+	"#ff6b6b",
+	"#51cf66",
+	"#fcc419",
+	"#cc5de8",
+	"#ff922b",
+	"#20c997",
+	"#f06595",
+}
+
+// ResolveTabColor returns the effective tab color given the raw config value and
+// the config file path. "none"/"no"/"false" suppresses the color; an empty value
+// selects a deterministic default from the palette based on the config filename.
+func ResolveTabColor(rawValue, configPath string) string {
+	switch strings.ToLower(rawValue) {
+	case "none", "no", "false":
+		return ""
+	}
+	if rawValue != "" {
+		return rawValue
+	}
+	name := filepath.Base(configPath)
+	h := fnv.New32a()
+	h.Write([]byte(name))
+	return defaultTabColors[h.Sum32()%uint32(len(defaultTabColors))]
+}
+
 type Config struct {
-	Server           string
-	RemoteRepo       string
-	IssueRepo        string
-	BranchRepo       string
-	DefaultBase      string
-	BranchNameFormat string
-	PostSetupCmd     string
-	ITermTabColor    string
-	PlanningContext  string
-	DispatchMode     string
+	Server           string `toml:"server"`
+	RemoteRepo       string `toml:"remote_repo"`
+	IssueRepo        string `toml:"issue_repo"`
+	BranchRepo       string `toml:"branch_repo"`
+	DefaultBase      string `toml:"default_base"`
+	BranchNameFormat string `toml:"branch_name_format"`
+	PostSetupCmd     string `toml:"post_setup_cmd"`
+	ITermTabColor    string `toml:"iterm_tab_color"`
+	PlanningContext  string `toml:"planning_context"`
+	DispatchMode     string `toml:"dispatch_mode"`
 }
 
 func Parse(path string) (*Config, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open config %s: %w", path, err)
-	}
-	defer f.Close()
-
 	cfg := &Config{DefaultBase: "main"}
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		eq := strings.IndexByte(line, '=')
-		if eq < 0 {
-			continue
-		}
-		key := strings.TrimSpace(line[:eq])
-		value := unquote(strings.TrimSpace(line[eq+1:]))
-
-		switch key {
-		case "DISPATCH_SERVER":
-			cfg.Server = value
-		case "DISPATCH_REMOTE_REPO":
-			cfg.RemoteRepo = value
-		case "DISPATCH_ISSUE_REPO":
-			cfg.IssueRepo = value
-		case "DISPATCH_BRANCH_REPO":
-			cfg.BranchRepo = value
-		case "DISPATCH_DEFAULT_BASE":
-			if value != "" {
-				cfg.DefaultBase = value
-			}
-		case "DISPATCH_BRANCH_NAME_FORMAT":
-			cfg.BranchNameFormat = value
-		case "DISPATCH_POST_SETUP_CMD":
-			cfg.PostSetupCmd = value
-		case "DISPATCH_ITERM_TAB_COLOR":
-			cfg.ITermTabColor = value
-		case "DISPATCH_PLANNING_CONTEXT":
-			cfg.PlanningContext = value
-		case "DISPATCH_MODE":
-			cfg.DispatchMode = value
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read config %s: %w", path, err)
+	if _, err := toml.DecodeFile(path, cfg); err != nil {
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	return cfg, nil
-}
-
-func unquote(s string) string {
-	if len(s) >= 2 {
-		first, last := s[0], s[len(s)-1]
-		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
-			return s[1 : len(s)-1]
-		}
-	}
-	return s
 }
