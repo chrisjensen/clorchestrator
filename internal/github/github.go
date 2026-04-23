@@ -50,6 +50,25 @@ func FormatBranchName(format, issue, handle string) string {
 	return s
 }
 
+// ListLinkedBranches returns branch names already linked to the given issue.
+func ListLinkedBranches(issueNum, issueRepo string) ([]string, error) {
+	out, err := runFunc("gh", "issue", "develop", issueNum, "--repo", issueRepo, "--list")
+	if err != nil {
+		return nil, fmt.Errorf("gh issue develop --list: %w: %s", err, string(out))
+	}
+	var branches []string
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if b, ok := ParseBranchFromOutput(line); ok {
+			branches = append(branches, b)
+		}
+	}
+	return branches, nil
+}
+
 // ParseBranchFromOutput extracts the branch name from `gh issue develop` output,
 // which typically prints a URL ending in the branch: .../tree/<branch-name>
 func ParseBranchFromOutput(out string) (string, bool) {

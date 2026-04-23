@@ -17,11 +17,15 @@ Iterates a markdown task file. Each '## <handle>' section must reference a
 GitHub issue (via #NNN, org/repo#NNN, or a GitHub URL). A 'base: <ref>' line
 overrides the default base branch. Runs 'gh issue develop' per task and opens
 one iTerm2 tab per task with a pre-configured Claude session.
+
+Flags:
+  --force-branch  Always create a new branch (fail if one already exists)
 `
 
 func RunFlock(args []string, stderr io.Writer) error {
 	fs := flag.NewFlagSet("flock", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	forceBranch := fs.Bool("force-branch", false, "always create a new branch")
 	fs.Usage = func() { fmt.Fprint(stderr, flockUsage) }
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -47,20 +51,34 @@ func RunFlock(args []string, stderr io.Writer) error {
 		if base == "" {
 			base = cfg.DefaultBase
 		}
-		fmt.Fprintf(stderr, "Creating branch for %q (#%s from %s)...\n", t.Handle, t.IssueNum, base)
-
-		branch, err := github.DevelopBranch(github.DevelopArgs{
-			IssueNum:         t.IssueNum,
-			IssueRepo:        cfg.IssueRepo,
-			BranchRepo:       cfg.BranchRepo,
-			Base:             base,
-			BranchNameFormat: cfg.BranchNameFormat,
-			Handle:           t.Handle,
-		})
-		if err != nil {
-			return fmt.Errorf("task %s: %w", t.Handle, err)
+		var branch string
+		if !*forceBranch {
+			existing, err := github.ListLinkedBranches(t.IssueNum, cfg.IssueRepo)
+			if err != nil {
+				return fmt.Errorf("task %s: list branches: %w", t.Handle, err)
+			}
+			if len(existing) > 0 {
+				branch = existing[0]
+				fmt.Fprintf(stderr, "Reusing existing branch for %q (#%s): %s\n", t.Handle, t.IssueNum, branch)
+			}
 		}
-		fmt.Fprintf(stderr, "  Branch: %s\n", branch)
+
+		if branch == "" {
+			fmt.Fprintf(stderr, "Creating branch for %q (#%s from %s)...\n", t.Handle, t.IssueNum, base)
+			var err error
+			branch, err = github.DevelopBranch(github.DevelopArgs{
+				IssueNum:         t.IssueNum,
+				IssueRepo:        cfg.IssueRepo,
+				BranchRepo:       cfg.BranchRepo,
+				Base:             base,
+				BranchNameFormat: cfg.BranchNameFormat,
+				Handle:           t.Handle,
+			})
+			if err != nil {
+				return fmt.Errorf("task %s: %w", t.Handle, err)
+			}
+			fmt.Fprintf(stderr, "  Branch: %s\n", branch)
+		}
 
 		startArgs := []string{configPath, t.Handle, branch, "--issue", t.IssueNum, "--tab"}
 		if t.ExtraContext != "" {
