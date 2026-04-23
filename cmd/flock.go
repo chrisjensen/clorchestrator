@@ -10,8 +10,8 @@ import (
 	"github.com/chrisjensen/clorchestrate/internal/taskfile"
 )
 
-const runUsage = `usage:
-  clorchestrate run <config> <tasks.md>
+const flockUsage = `usage:
+  clorchestrate flock <config> <tasks.md>
 
 Iterates a markdown task file. Each '## <handle>' section must reference a
 GitHub issue (via #NNN, org/repo#NNN, or a GitHub URL). A 'base: <ref>' line
@@ -19,10 +19,10 @@ overrides the default base branch. Runs 'gh issue develop' per task and opens
 one iTerm2 tab per task with a pre-configured Claude session.
 `
 
-func RunRun(args []string, stderr io.Writer) error {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+func RunFlock(args []string, stderr io.Writer) error {
+	fs := flag.NewFlagSet("flock", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.Usage = func() { fmt.Fprint(stderr, runUsage) }
+	fs.Usage = func() { fmt.Fprint(stderr, flockUsage) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -66,8 +66,8 @@ func RunRun(args []string, stderr io.Writer) error {
 		if t.ExtraContext != "" {
 			startArgs = append(startArgs, "--extra-context", t.ExtraContext)
 		}
-		if err := RunStart(startArgs, stderr); err != nil {
-			return fmt.Errorf("start for %s: %w", t.Handle, err)
+		if err := RunOpen(startArgs, stderr); err != nil {
+			return fmt.Errorf("open for %s: %w", t.Handle, err)
 		}
 	}
 	return nil

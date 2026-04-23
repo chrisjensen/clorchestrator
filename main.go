@@ -10,8 +10,9 @@ import (
 const rootUsage = `clorchestrate — orchestrate parallel Claude coding sessions
 
 Usage:
-  clorchestrate run <config> <tasks.md>    Iterate a task file; opens one iTerm2 tab per task
-  clorchestrate start <config> [...]        Start a single session (see 'clorchestrate start --help')
+  clorchestrate flock <config> <tasks.md>    Launch all sessions from a task file
+  clorchestrate open <config> [...]           Launch a single session (see 'clorchestrate open --help')
+  clorchestrate reconnect [<config>]          Reconnect detached/attached screen sessions
 
 Run 'clorchestrate <subcommand> --help' for details.
 `
@@ -26,10 +27,12 @@ func main() {
 
 	var err error
 	switch sub {
-	case "run":
-		err = cmd.RunRun(args, os.Stderr)
-	case "start":
-		err = cmd.RunStart(args, os.Stderr)
+	case "flock":
+		err = cmd.RunFlock(args, os.Stderr)
+	case "open":
+		err = cmd.RunOpen(args, os.Stderr)
+	case "reconnect":
+		err = cmd.RunReconnect(args, os.Stderr)
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, rootUsage)
 		return
