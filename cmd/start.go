@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/chrisjensen/clorchestrate/internal/conffile"
@@ -65,7 +66,10 @@ func RunStart(args []string, stderr io.Writer) error {
 		fs.Usage()
 		return fmt.Errorf("missing <config>")
 	}
-	configPath := positional[0]
+	configPath, err := resolveConfigPath(positional[0])
+	if err != nil {
+		return err
+	}
 	var handle, branch string
 	if len(positional) >= 2 {
 		handle = positional[1]
@@ -131,13 +135,14 @@ func RunStart(args []string, stderr io.Writer) error {
 
 	remoteCmd := buildRemoteCmd(cfg, mode, handle)
 
+	tabColor := config.ResolveTabColor(cfg.ITermTabColor, configPath)
 	if *openTab {
 		return iterm.OpenTab(iterm.TabOptions{
-			TabColorHex: cfg.ITermTabColor,
+			TabColorHex: tabColor,
 			RemoteCmd:   remoteCmd,
 		})
 	}
-	return runInCurrentTerminal(cfg.ITermTabColor, remoteCmd)
+	return runInCurrentTerminal(tabColor, remoteCmd)
 }
 
 // runInCurrentTerminal sets the tab color (if any) then runs the remote
@@ -187,6 +192,19 @@ func writeTaskConf(server, handle string, tc conffile.TaskConf) error {
 		return fmt.Errorf("write task conf on %s: %w", server, err)
 	}
 	return nil
+}
+
+// resolveConfigPath expands a bare name (no path separators) to
+// ~/.clorchestrate/{name}.toml. Full and relative paths are returned as-is.
+func resolveConfigPath(name string) (string, error) {
+	if strings.ContainsRune(name, '/') || strings.HasPrefix(name, ".") {
+		return name, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve config path: %w", err)
+	}
+	return filepath.Join(home, ".clorchestrate", name+".toml"), nil
 }
 
 func buildRemoteCmd(cfg *config.Config, mode Mode, handle string) string {
