@@ -22,6 +22,13 @@ if [[ -d "$REPO_ROOT/.claude" ]]; then
   echo "Copied .claude/ (skills, settings)"
 fi
 
+for doc_file in CLAUDE.md AGENTS.md; do
+  if [[ -f "$REPO_ROOT/$doc_file" ]] && [[ ! -f "$WORKTREE_DIR/$doc_file" ]]; then
+    cp "$REPO_ROOT/$doc_file" "$WORKTREE_DIR/$doc_file"
+    echo "Copied $doc_file"
+  fi
+done
+
 [[ -f "$REPO_ROOT/.env" ]] && cp "$REPO_ROOT/.env" "$WORKTREE_DIR/.env" && echo "Copied .env"
 
 mkdir -p "$WORKTREE_DIR/resources"
