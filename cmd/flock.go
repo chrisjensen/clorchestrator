@@ -20,12 +20,14 @@ one iTerm2 tab per task with a pre-configured Claude session.
 
 Flags:
   --force-branch  Always create a new branch (fail if one already exists)
+  --fresh         Kill any existing matching screen session and re-run setup
 `
 
 func RunFlock(args []string, stderr io.Writer) error {
 	fs := flag.NewFlagSet("flock", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	forceBranch := fs.Bool("force-branch", false, "always create a new branch")
+	fresh := fs.Bool("fresh", false, "kill any existing matching screen session before launching")
 	fs.Usage = func() { fmt.Fprint(stderr, flockUsage) }
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -81,6 +83,9 @@ func RunFlock(args []string, stderr io.Writer) error {
 		}
 
 		startArgs := []string{configPath, t.Handle, branch, "--issue", t.IssueNum, "--tab"}
+		if *fresh {
+			startArgs = append(startArgs, "--fresh")
+		}
 		if t.ExtraContext != "" {
 			startArgs = append(startArgs, "--extra-context", t.ExtraContext)
 		}

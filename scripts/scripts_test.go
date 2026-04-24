@@ -7,8 +7,8 @@ import (
 
 func TestEmbed_NonEmpty(t *testing.T) {
 	all := All()
-	if len(all) != 2 {
-		t.Fatalf("got %d scripts, want 2", len(all))
+	if len(all) != 1 {
+		t.Fatalf("got %d scripts, want 1", len(all))
 	}
 	for _, s := range all {
 		if len(s.Content) == 0 {

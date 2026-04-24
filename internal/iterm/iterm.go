@@ -11,6 +11,7 @@ import (
 type TabOptions struct {
 	TabColorHex string // "#RRGGBB" or "RRGGBB", may be empty
 	RemoteCmd   string // the shell command the new tab will run
+	FollowupCmd string // optional; typed once a shell prompt is detected after RemoteCmd
 }
 
 // WriteTabColor emits iTerm2 escape sequences to w to set the current
@@ -44,16 +45,53 @@ func BuildAppleScript(opts TabOptions) string {
 			colorCmd = esc + "; "
 		}
 	}
-	// Escape double quotes and backslashes in the write text arg for AppleScript.
-	inner := colorCmd + opts.RemoteCmd
+	firstLine := fmt.Sprintf(`      write text "%s"`, appleScriptEscape(colorCmd+opts.RemoteCmd))
+
+	extra := ""
+	if opts.FollowupCmd != "" {
+		// Poll contents of the tab until something is waiting for input:
+		//   1. Content has grown (SSH produced output — banner, MOTD, or prompt)
+		//   2. Content has been stable for ~300ms (nothing printing right now)
+		// Together these mean "there's a new prompt and we're idle." We
+		// deliberately don't match specific prompt characters because PS1
+		// styles vary and iTerm's "contents" can trim trailing whitespace.
+		// Poll is 50ms for fast response; hard cap ~20s.
+		extra = fmt.Sprintf(`
+      set priorContent to (contents as text)
+      set priorLen to (length of priorContent)
+      set lastContent to priorContent
+      set stableCount to 0
+      set readyFound to false
+      repeat 400 times
+        delay 0.05
+        set cs to (contents as text)
+        if ((length of cs) > priorLen + 5) then
+          if cs is equal to lastContent then
+            set stableCount to stableCount + 1
+            if stableCount is greater than or equal to 6 then
+              set readyFound to true
+              exit repeat
+            end if
+          else
+            set stableCount to 0
+            set lastContent to cs
+          end if
+        end if
+      end repeat
+      if not readyFound then
+        delay 1
+      end if
+      write text "%s"`, appleScriptEscape(opts.FollowupCmd))
+	}
+
 	return fmt.Sprintf(`tell application "iTerm2"
   tell current window
     create tab with default profile
     tell current session of current tab
-      write text "%s"
+%s%s
     end tell
   end tell
-end tell`, appleScriptEscape(inner))
+end tell`, firstLine, extra)
 }
 
 // tabColorEscape returns a `printf '\033]...'` command that sets the iTerm2

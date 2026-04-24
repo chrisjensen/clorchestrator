@@ -62,6 +62,32 @@ func TestBuildAppleScript_NoColor(t *testing.T) {
 	}
 }
 
+func TestBuildAppleScript_WithFollowup(t *testing.T) {
+	got := BuildAppleScript(TabOptions{
+		RemoteCmd:   "ssh myserver",
+		FollowupCmd: `claude "hi"`,
+	})
+	if !strings.Contains(got, "ssh myserver") {
+		t.Errorf("missing remote cmd:\n%s", got)
+	}
+	if !strings.Contains(got, "priorContent") {
+		t.Errorf("expected contents-polling loop:\n%s", got)
+	}
+	if !strings.Contains(got, "stableCount") {
+		t.Errorf("expected stability-based polling:\n%s", got)
+	}
+	if !strings.Contains(got, `claude \"hi\"`) {
+		t.Errorf("missing escaped followup:\n%s", got)
+	}
+}
+
+func TestBuildAppleScript_NoFollowup(t *testing.T) {
+	got := BuildAppleScript(TabOptions{RemoteCmd: "ssh myserver"})
+	if strings.Contains(got, "priorContent") {
+		t.Errorf("should not contain polling loop when FollowupCmd empty:\n%s", got)
+	}
+}
+
 func TestAppleScriptEscape(t *testing.T) {
 	got := appleScriptEscape(`say "hello" \n`)
 	want := `say \"hello\" \\n`
