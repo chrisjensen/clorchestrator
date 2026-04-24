@@ -15,11 +15,16 @@ import (
 )
 
 const reconnectUsage = `usage:
-  clorchestrate reconnect [<config>]
+  clorchestrate reconnect [<config>] [--force]
 
 Without <config>: reconnect all sessions for every config in ~/.clorchestrate/
 that has a 'server' field set.
 With <config>: reconnect only sessions belonging to that config.
+
+By default only Detached sessions are reattached (via 'screen -r'), so
+sessions already open in another tab are left alone. Pass --force to
+forcibly reattach any matching session (via 'screen -dr'), detaching any
+currently-connected client.
 `
 
 type screenSession struct {
@@ -35,6 +40,7 @@ type configEntry struct {
 func RunReconnect(args []string, stderr io.Writer) error {
 	fs := flag.NewFlagSet("reconnect", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	force := fs.Bool("force", false, "forcibly reattach matching sessions using 'screen -dr'")
 	fs.Usage = func() { fmt.Fprint(stderr, reconnectUsage) }
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -93,11 +99,19 @@ func RunReconnect(args []string, stderr io.Writer) error {
 			prefix := configID + "_"
 			tabColor := config.ResolveTabColor(e.cfg.ITermTabColor, e.path)
 
+			screenAction := "screen -r"
+			if *force {
+				screenAction = "screen -dr"
+			}
 			for _, sess := range sessions {
 				if !strings.HasPrefix(sess.name, prefix) {
 					continue
 				}
-				reconnectCmd := fmt.Sprintf(`ssh -t %s "screen -dr %s"`, server, sess.name)
+				if !*force && sess.state != "Detached" {
+					fmt.Fprintf(stderr, "skipping %s (%s) — pass --force to reattach\n", sess.name, sess.state)
+					continue
+				}
+				reconnectCmd := fmt.Sprintf(`ssh -t %s "%s %s"`, server, screenAction, sess.name)
 				if err := iterm.OpenTab(iterm.TabOptions{
 					TabColorHex: tabColor,
 					RemoteCmd:   reconnectCmd,

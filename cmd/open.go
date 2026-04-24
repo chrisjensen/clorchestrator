@@ -130,16 +130,21 @@ func RunOpen(args []string, stderr io.Writer) error {
 	if mode == ModeFullTask || mode == ModeWorktree {
 		sessionName := configID + "_" + handle
 		if *fresh {
-			if id := findExistingSession(cfg.Server, sessionName); id != "" {
+			if id, _ := findExistingSession(cfg.Server, sessionName); id != "" {
 				fmt.Fprintf(stderr, "--fresh: killing existing screen session %s (%s)\n", sessionName, id)
 				if err := killSession(cfg.Server, id); err != nil {
 					fmt.Fprintf(stderr, "  warning: kill failed: %v\n", err)
 				}
 			}
 		}
-		existingSessID = findExistingSession(cfg.Server, sessionName)
+		id, state := findExistingSession(cfg.Server, sessionName)
+		if id != "" && state != "Detached" {
+			fmt.Fprintf(stderr, "screen session %s exists but is %s — skipping (use --fresh to take over)\n", sessionName, state)
+			return nil
+		}
+		existingSessID = id
 		if existingSessID != "" {
-			fmt.Fprintf(stderr, "screen session %s already exists (%s) — reattaching (re-run with --fresh to start over)\n", sessionName, existingSessID)
+			fmt.Fprintf(stderr, "screen session %s exists and is Detached (%s) — reattaching (re-run with --fresh to start over)\n", sessionName, existingSessID)
 		}
 	}
 
@@ -297,16 +302,29 @@ func resolveConfigPath(name string) (string, error) {
 	return filepath.Join(home, ".clorchestrate", name+".toml"), nil
 }
 
-// findExistingSession returns the full "PID.name" session ID if a screen session
-// matching sessionName exists on the server, or "" if none found or SSH fails.
-func findExistingSession(server, sessionName string) string {
+// findExistingSession returns the full "PID.name" session ID and its screen
+// state (e.g. "Detached", "Attached") for a session matching sessionName on
+// the server, or "","" if none found or SSH fails.
+func findExistingSession(server, sessionName string) (id, state string) {
 	out, err := exec.Command("ssh", server,
-		fmt.Sprintf("screen -ls | grep -F '.%s' | head -1 | awk '{print $1}'", sessionName),
+		fmt.Sprintf("screen -ls | grep -F '.%s' | head -1", sessionName),
 	).Output()
 	if err != nil || len(bytes.TrimSpace(out)) == 0 {
-		return ""
+		return "", ""
 	}
-	return strings.TrimSpace(string(out))
+	sessions := parseScreenLs(string(out))
+	if len(sessions) == 0 {
+		return "", ""
+	}
+	s := sessions[0]
+	// parseScreenLs strips the PID prefix; rebuild "PID.name" for screen -r/-dr.
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) > 0 {
+		id = fields[0]
+	} else {
+		id = s.name
+	}
+	return id, s.state
 }
 
 // killSession terminates the named screen session on the server, then reaps
@@ -325,9 +343,10 @@ func buildRemoteCmd(cfg *config.Config, mode Mode, handle, sessionName, existing
 	switch mode {
 	case ModeFullTask, ModeWorktree:
 		if existingSessID != "" {
-			// -d detaches any existing attached client; -r reattaches here.
-			// Ensures only one tab is live against the session at a time.
-			return fmt.Sprintf(`ssh -t %s "screen -dr %s"`,
+			// Reattach only — caller has already confirmed state=Detached.
+			// Using plain -r (not -dr) avoids stealing a session that got
+			// reattached between the check and this command running.
+			return fmt.Sprintf(`ssh -t %s "screen -r %s"`,
 				cfg.Server, existingSessID)
 		}
 		return fmt.Sprintf(`ssh -t %s "screen -S %s bash -l"`, cfg.Server, sessionName)

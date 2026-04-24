@@ -52,8 +52,11 @@ func TestBuildRemoteCmd_FullTaskFresh(t *testing.T) {
 func TestBuildRemoteCmd_FullTaskReattach(t *testing.T) {
 	cfg := &config.Config{Server: "myserver"}
 	got := buildRemoteCmd(cfg, ModeFullTask, "my-handle", "mycon_my-handle", "12345.mycon_my-handle")
-	if !strings.Contains(got, "screen -dr 12345.mycon_my-handle") {
-		t.Errorf("expected screen -dr for force-reattach: %s", got)
+	if !strings.Contains(got, "screen -r 12345.mycon_my-handle") {
+		t.Errorf("expected screen -r for reattach: %s", got)
+	}
+	if strings.Contains(got, "screen -dr") {
+		t.Errorf("reattach should not force-detach with -dr: %s", got)
 	}
 }
 
