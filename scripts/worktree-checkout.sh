@@ -71,7 +71,6 @@ done
 
 mkdir -p "$WORKTREE_DIR/resources/input"
 [[ -d "$RESOURCES/config" ]] && ln -s "$RESOURCES/config" "$WORKTREE_DIR/resources/config"
-[[ -d "$RESOURCES/output" ]] && ln -s "$RESOURCES/output" "$WORKTREE_DIR/resources/output"
 [[ -d "$RESOURCES/input/local" ]] && ln -s "$RESOURCES/input/local" "$WORKTREE_DIR/resources/input/local"
 [[ -d "$RESOURCES/input/my" ]] && ln -s "$RESOURCES/input/my" "$WORKTREE_DIR/resources/input/my"
 echo "Symlinked resources"
