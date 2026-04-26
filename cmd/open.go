@@ -83,7 +83,7 @@ func RunOpen(args []string, stderr io.Writer) error {
 	}
 	var handle, branch string
 	if len(positional) >= 2 {
-		handle = positional[1]
+		handle = strings.ReplaceAll(positional[1], " ", "-")
 	}
 	if len(positional) >= 3 {
 		branch = positional[2]
