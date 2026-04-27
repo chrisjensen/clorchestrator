@@ -111,7 +111,7 @@ func RunReconnect(args []string, stderr io.Writer) error {
 					fmt.Fprintf(stderr, "skipping %s (%s) — pass --force to reattach\n", sess.name, sess.state)
 					continue
 				}
-				reconnectCmd := fmt.Sprintf(`ssh -t %s "%s %s"`, server, screenAction, sess.name)
+				reconnectCmd := fmt.Sprintf(`ssh -t %s "%s '%s'"`, server, screenAction, sess.name)
 				if err := iterm.OpenTab(iterm.TabOptions{
 					TabColorHex: tabColor,
 					RemoteCmd:   reconnectCmd,
@@ -163,7 +163,11 @@ func listScreenSessions(server string) ([]screenSession, error) {
 // parseScreenLs parses the output of `screen -ls` into a list of sessions.
 // Lines containing sessions look like:
 //
-//	\t<pid>.<name>\t(<state>)
+//	\t<pid>.<name>\t(<timestamp>)\t(<state>)
+//
+// Some screen versions omit the timestamp field. Session names never contain
+// whitespace, so we take the first field after the dot as the name and find
+// the state in the last parenthesised field.
 func parseScreenLs(output string) []screenSession {
 	var sessions []screenSession
 	for _, line := range strings.Split(output, "\n") {
@@ -177,12 +181,19 @@ func parseScreenLs(output string) []screenSession {
 			continue
 		}
 		rest := trimmed[dotIdx+1:]
-		parenIdx := strings.LastIndex(rest, "(")
-		if parenIdx == -1 {
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
 			continue
 		}
-		name := strings.TrimSpace(rest[:parenIdx])
-		state := strings.TrimSuffix(strings.TrimSpace(rest[parenIdx+1:]), ")")
+		name := fields[0]
+		state := ""
+		for i := len(fields) - 1; i >= 1; i-- {
+			f := fields[i]
+			if strings.HasPrefix(f, "(") && strings.HasSuffix(f, ")") {
+				state = f[1 : len(f)-1]
+				break
+			}
+		}
 		if name == "" {
 			continue
 		}
