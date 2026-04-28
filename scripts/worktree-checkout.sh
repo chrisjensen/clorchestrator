@@ -53,7 +53,13 @@ cd "$REPO_ROOT"
 git fetch origin
 
 echo "Checking out $BRANCH into $WORKTREE_DIR..."
-git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH"
+if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+  git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" "origin/$BRANCH"
+elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+  git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH"
+else
+  git -C "$REPO_ROOT" worktree add -b "$BRANCH" "$WORKTREE_DIR"
+fi
 
 if [[ -d "$REPO_ROOT/.claude" ]]; then
   cp -r "$REPO_ROOT/.claude" "$WORKTREE_DIR/.claude"
