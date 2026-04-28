@@ -76,12 +76,18 @@ func remoteHash(r Runner, server, remotePath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("ssh %s: %w: %s", server, err, string(out))
 	}
-	s := strings.TrimSpace(string(out))
-	if s == "MISSING" || s == "" {
-		return "", nil
+	// SSH may emit warnings on stderr (e.g. port-forwarding failures) which
+	// CombinedOutput mixes in. Scan for the sha256 line explicitly.
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "MISSING" {
+			return "", nil
+		}
+		if len(line) == 64 && isHex(line) {
+			return line, nil
+		}
 	}
-	// Some shasum versions prefix with hash only (due to awk), we already stripped.
-	return s, nil
+	return "", nil
 }
 
 func ensureRemoteBinDir(r Runner, server string) error {
@@ -116,6 +122,15 @@ func uploadScript(r Runner, server string, s Script, remotePath string) error {
 		return fmt.Errorf("chmod: %w: %s", err, string(out))
 	}
 	return nil
+}
+
+func isHex(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func sha256Hex(b []byte) string {
