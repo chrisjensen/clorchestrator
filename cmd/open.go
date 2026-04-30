@@ -286,6 +286,10 @@ Open %s and review:
 
 ## Additional context
 %s
+
+## Planning instructions
+- Ensure the plan is consistent with the existing architecture and patterns of the codebase
+- After generating the plan, check what was missed from the plan
 `, issueNum, issueRepo, planningContext, issueURL, extraContext)
 }
 
