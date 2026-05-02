@@ -48,13 +48,14 @@ func RunOpen(args []string, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	issue := fs.String("issue", "", "issue ref (number, #NNN, org/repo#NNN, or URL)")
 	extra := fs.String("extra-context", "", "extra context for planning prompt")
+	service := fs.String("service", "", "service name to resolve repo/setup overrides from config")
 	openTab := fs.Bool("tab", false, "open a new iTerm2 tab instead of running in current terminal")
 	fresh := fs.Bool("fresh", false, "kill any existing matching screen session before launching")
 	fs.Usage = func() { fmt.Fprint(stderr, openUsage) }
 
 	// Interleaved parser: flags may appear anywhere among positional args.
 	// Value flags consume the next token; bool flags stand alone.
-	valueFlags := map[string]bool{"--issue": true, "--extra-context": true}
+	valueFlags := map[string]bool{"--issue": true, "--extra-context": true, "--service": true}
 	var positional []string
 	var flagArgs []string
 	for i := 0; i < len(args); i++ {
@@ -93,7 +94,11 @@ func RunOpen(args []string, stderr io.Writer) error {
 		return fmt.Errorf("too many positional arguments")
 	}
 
-	cfg, err := config.Parse(configPath)
+	baseCfg, err := config.Parse(configPath)
+	if err != nil {
+		return err
+	}
+	cfg, err := baseCfg.ResolveService(*service)
 	if err != nil {
 		return err
 	}

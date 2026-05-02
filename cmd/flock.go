@@ -7,6 +7,7 @@ import (
 
 	"github.com/chrisjensen/clorchestrate/internal/config"
 	"github.com/chrisjensen/clorchestrate/internal/github"
+	"github.com/chrisjensen/clorchestrate/internal/iterm"
 	"github.com/chrisjensen/clorchestrate/internal/taskfile"
 )
 
@@ -48,14 +49,28 @@ func RunFlock(args []string, stderr io.Writer) error {
 		return err
 	}
 
+	configID, err := config.ConfigID(configPath)
+	if err != nil {
+		return err
+	}
+
+	if err := startServices(cfg, configID, configPath, stderr); err != nil {
+		return err
+	}
+
 	for _, t := range tasks {
+		effectiveCfg, err := cfg.ResolveService(t.Service)
+		if err != nil {
+			return fmt.Errorf("task %s: %w", t.Handle, err)
+		}
+
 		base := t.BaseBranch
 		if base == "" {
-			base = cfg.DefaultBase
+			base = effectiveCfg.DefaultBase
 		}
 		var branch string
 		if !*forceBranch {
-			existing, err := github.ListLinkedBranches(t.IssueNum, cfg.IssueRepo)
+			existing, err := github.ListLinkedBranches(t.IssueNum, effectiveCfg.IssueRepo)
 			if err != nil {
 				return fmt.Errorf("task %s: list branches: %w", t.Handle, err)
 			}
@@ -70,10 +85,10 @@ func RunFlock(args []string, stderr io.Writer) error {
 			var err error
 			branch, err = github.DevelopBranch(github.DevelopArgs{
 				IssueNum:         t.IssueNum,
-				IssueRepo:        cfg.IssueRepo,
-				BranchRepo:       cfg.BranchRepo,
+				IssueRepo:        effectiveCfg.IssueRepo,
+				BranchRepo:       effectiveCfg.BranchRepo,
 				Base:             base,
-				BranchNameFormat: cfg.BranchNameFormat,
+				BranchNameFormat: effectiveCfg.BranchNameFormat,
 				Handle:           t.Handle,
 			})
 			if err != nil {
@@ -89,8 +104,38 @@ func RunFlock(args []string, stderr io.Writer) error {
 		if t.ExtraContext != "" {
 			startArgs = append(startArgs, "--extra-context", t.ExtraContext)
 		}
+		if t.Service != "" {
+			startArgs = append(startArgs, "--service", t.Service)
+		}
 		if err := RunOpen(startArgs, stderr); err != nil {
 			return fmt.Errorf("open for %s: %w", t.Handle, err)
+		}
+	}
+	return nil
+}
+
+// startServices opens one persistent iTerm tab per service that has a start_cmd,
+// unless that service's screen session is already running on the server.
+func startServices(cfg *config.Config, configID, configPath string, stderr io.Writer) error {
+	tabColor := config.ResolveTabColor(cfg.ITermTabColor, configPath)
+	for _, svc := range cfg.Services {
+		if svc.StartCmd == "" {
+			continue
+		}
+		sessionName := configID + "_svc_" + svc.Name
+		id, state := findExistingSession(cfg.Server, sessionName)
+		if id != "" {
+			fmt.Fprintf(stderr, "Service %q: session %s already %s — skipping\n", svc.Name, sessionName, state)
+			continue
+		}
+		fmt.Fprintf(stderr, "Starting service %q in session %s\n", svc.Name, sessionName)
+		remoteCmd := fmt.Sprintf(`ssh -t %s "screen -S %s bash -lc 'cd %s && %s'"`,
+			cfg.Server, sessionName, svc.RemoteRepo, svc.StartCmd)
+		if err := iterm.OpenTab(iterm.TabOptions{
+			TabColorHex: tabColor,
+			RemoteCmd:   remoteCmd,
+		}); err != nil {
+			return fmt.Errorf("open service tab for %s: %w", svc.Name, err)
 		}
 	}
 	return nil
