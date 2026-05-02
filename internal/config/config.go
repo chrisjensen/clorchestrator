@@ -39,18 +39,63 @@ func ResolveTabColor(rawValue, configPath string) string {
 	return defaultTabColors[h.Sum32()%uint32(len(defaultTabColors))]
 }
 
+// Service describes a subsystem within a project that may have its own repo,
+// setup command, and optionally a persistent process (start_cmd).
+type Service struct {
+	Name         string `toml:"name"`
+	RemoteRepo   string `toml:"remote_repo"`
+	IssueRepo    string `toml:"issue_repo"`
+	BranchRepo   string `toml:"branch_repo"`
+	DefaultBase  string `toml:"default_base"`
+	PostSetupCmd string `toml:"post_setup_cmd"`
+	StartCmd     string `toml:"start_cmd"`
+}
+
 type Config struct {
-	Server           string `toml:"server"`
-	RemoteRepo       string `toml:"remote_repo"`
-	IssueRepo        string `toml:"issue_repo"`
-	BranchRepo       string `toml:"branch_repo"`
-	DefaultBase      string `toml:"default_base"`
-	BranchNameFormat string `toml:"branch_name_format"`
-	PostSetupCmd     string `toml:"post_setup_cmd"`
-	ITermTabColor    string `toml:"iterm_tab_color"`
-	PlanningContext  string `toml:"planning_context"`
-	DispatchMode     string `toml:"dispatch_mode"`
-	ID               string `toml:"id"`
+	Server           string    `toml:"server"`
+	RemoteRepo       string    `toml:"remote_repo"`
+	IssueRepo        string    `toml:"issue_repo"`
+	BranchRepo       string    `toml:"branch_repo"`
+	DefaultBase      string    `toml:"default_base"`
+	BranchNameFormat string    `toml:"branch_name_format"`
+	PostSetupCmd     string    `toml:"post_setup_cmd"`
+	ITermTabColor    string    `toml:"iterm_tab_color"`
+	PlanningContext  string    `toml:"planning_context"`
+	DispatchMode     string    `toml:"dispatch_mode"`
+	ID               string    `toml:"id"`
+	Services         []Service `toml:"service"`
+}
+
+// ResolveService returns a copy of the config with the named service's fields
+// overlaid. Fields set on the service override the global value; unset fields
+// fall back to the global value. Returns the config unchanged when name is
+// empty (backward-compatible with configs that have no [[service]] blocks).
+func (c *Config) ResolveService(name string) (*Config, error) {
+	if name == "" {
+		return c, nil
+	}
+	for _, svc := range c.Services {
+		if svc.Name == name {
+			resolved := *c
+			if svc.RemoteRepo != "" {
+				resolved.RemoteRepo = svc.RemoteRepo
+			}
+			if svc.IssueRepo != "" {
+				resolved.IssueRepo = svc.IssueRepo
+			}
+			if svc.BranchRepo != "" {
+				resolved.BranchRepo = svc.BranchRepo
+			}
+			if svc.DefaultBase != "" {
+				resolved.DefaultBase = svc.DefaultBase
+			}
+			if svc.PostSetupCmd != "" {
+				resolved.PostSetupCmd = svc.PostSetupCmd
+			}
+			return &resolved, nil
+		}
+	}
+	return nil, fmt.Errorf("service %q not found in config", name)
 }
 
 // ConfigID returns the effective identifier for the config at configPath.
