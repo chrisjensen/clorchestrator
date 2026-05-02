@@ -1,0 +1,42 @@
+# Config example for a project with multiple services/repos.
+# Copy to ~/.clorchestrate/<project>.toml and fill in real values.
+#
+# Services inherit server, default_base, iterm_tab_color, and planning_context
+# from the top level. Override only what differs per service.
+#
+# Tasks in the task file use  service: <name>  to route to the right repo.
+
+server = "myserver.example.com"
+default_base = "main"
+iterm_tab_color = "#336699"
+
+# planning_context is injected into every task prompt.
+planning_context = ""
+
+# [[service]] blocks define the subsystems of the project.
+# Fields not set here fall back to the top-level values above.
+
+[[service]]
+name = "api"
+remote_repo = "~/src/myproject-api"
+issue_repo = "org/myproject-api"
+branch_repo = "org/myproject-api"
+post_setup_cmd = "go mod download"
+# start_cmd: runs in a persistent screen session (one per flock run, not per branch).
+start_cmd = "go run ./cmd/server"
+
+[[service]]
+name = "frontend"
+remote_repo = "~/src/myproject-frontend"
+issue_repo = "org/myproject-frontend"
+branch_repo = "org/myproject-frontend"
+post_setup_cmd = "npm install"
+start_cmd = "npm run dev"
+
+[[service]]
+name = "worker"
+remote_repo = "~/src/myproject-worker"
+issue_repo = "org/myproject-worker"
+branch_repo = "org/myproject-worker"
+post_setup_cmd = "go mod download"
+# No start_cmd — available for tasks but no persistent session.
