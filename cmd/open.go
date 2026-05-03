@@ -122,10 +122,6 @@ func RunOpen(args []string, stderr io.Writer) error {
 		return err
 	}
 
-	if cfg.Server == "" && mode != ModeBareSession {
-		return fmt.Errorf("DISPATCH_SERVER is required")
-	}
-
 	configID, err := config.ConfigID(configPath)
 	if err != nil {
 		return err
@@ -157,7 +153,11 @@ func RunOpen(args []string, stderr io.Writer) error {
 	// Streams output to the local terminal so setup failures surface before
 	// any screen session exists.
 	if (mode == ModeFullTask || mode == ModeWorktree) && existingSessID == "" {
-		fmt.Fprintf(stderr, "Running setup for %s on %s…\n", handle, cfg.Server)
+		location := cfg.Server
+		if location == "" {
+			location = "local"
+		}
+		fmt.Fprintf(stderr, "Running setup for %s on %s…\n", handle, location)
 		if err := syncServerScripts(cfg.Server, stderr); err != nil {
 			return err
 		}
@@ -242,7 +242,11 @@ func syncServerScripts(server string, stderr io.Writer) error {
 
 func writeTaskConf(server, handle string, tc conffile.TaskConf) error {
 	content := conffile.Render(tc)
-	cmd := exec.Command("ssh", server, fmt.Sprintf("cat > /tmp/task-%s.conf", handle))
+	path := fmt.Sprintf("/tmp/task-%s.conf", handle)
+	if server == "" {
+		return os.WriteFile(path, []byte(content), 0644)
+	}
+	cmd := exec.Command("ssh", server, fmt.Sprintf("cat > %s", path))
 	cmd.Stdin = strings.NewReader(content)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -253,7 +257,11 @@ func writeTaskConf(server, handle string, tc conffile.TaskConf) error {
 }
 
 func writePromptFile(server, handle, prompt string) error {
-	cmd := exec.Command("ssh", server, fmt.Sprintf("cat > /tmp/task-%s.prompt.md", handle))
+	path := fmt.Sprintf("/tmp/task-%s.prompt.md", handle)
+	if server == "" {
+		return os.WriteFile(path, []byte(prompt), 0644)
+	}
+	cmd := exec.Command("ssh", server, fmt.Sprintf("cat > %s", path))
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -263,12 +271,21 @@ func writePromptFile(server, handle, prompt string) error {
 	return nil
 }
 
-// runSetup runs ~/bin/worktree-checkout.sh <handle> on the server over plain
-// (non-tty) SSH. Output streams live to the local terminal so the user sees
-// progress and any failures immediately. Returns non-nil error if the script
-// exits non-zero.
+// runSetup runs ~/bin/worktree-checkout.sh <handle>. When server is set it
+// runs over plain (non-tty) SSH; otherwise it runs locally. Output streams
+// live to the local terminal so the user sees progress and any failures
+// immediately. Returns non-nil error if the script exits non-zero.
 func runSetup(server, handle string) error {
-	cmd := exec.Command("ssh", server, fmt.Sprintf("~/bin/worktree-checkout.sh %s", handle))
+	var cmd *exec.Cmd
+	if server == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		cmd = exec.Command(filepath.Join(home, "bin", "worktree-checkout.sh"), handle)
+	} else {
+		cmd = exec.Command("ssh", server, fmt.Sprintf("~/bin/worktree-checkout.sh %s", handle))
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -312,12 +329,18 @@ func resolveConfigPath(name string) (string, error) {
 }
 
 // findExistingSession returns the full "PID.name" session ID and its screen
-// state (e.g. "Detached", "Attached") for a session matching sessionName on
-// the server, or "","" if none found or SSH fails.
+// state (e.g. "Detached", "Attached") for a session matching sessionName.
+// When server is "" it queries the local screen; otherwise it queries via SSH.
+// Returns "","" if none found or the command fails.
 func findExistingSession(server, sessionName string) (id, state string) {
-	out, err := exec.Command("ssh", server,
-		fmt.Sprintf("screen -ls | grep -F '.%s' | head -1", sessionName),
-	).Output()
+	grepCmd := fmt.Sprintf("screen -ls | grep -F '.%s' | head -1", sessionName)
+	var out []byte
+	var err error
+	if server == "" {
+		out, err = exec.Command("sh", "-c", grepCmd).Output()
+	} else {
+		out, err = exec.Command("ssh", server, grepCmd).Output()
+	}
 	if err != nil || len(bytes.TrimSpace(out)) == 0 {
 		return "", ""
 	}
@@ -336,19 +359,38 @@ func findExistingSession(server, sessionName string) (id, state string) {
 	return id, s.state
 }
 
-// killSession terminates the named screen session on the server, then reaps
-// dead session sockets via `screen -wipe`.
+// killSession terminates the named screen session, then reaps dead session
+// sockets via `screen -wipe`. Runs locally when server is "".
 func killSession(server, sessionID string) error {
-	cmd := exec.Command("ssh", server,
-		fmt.Sprintf("screen -S %s -X quit 2>/dev/null; screen -wipe >/dev/null 2>&1; true", sessionID),
-	)
+	shellCmd := fmt.Sprintf("screen -S %s -X quit 2>/dev/null; screen -wipe >/dev/null 2>&1; true", sessionID)
+	var cmd *exec.Cmd
+	if server == "" {
+		cmd = exec.Command("sh", "-c", shellCmd)
+	} else {
+		cmd = exec.Command("ssh", server, shellCmd)
+	}
 	return cmd.Run()
 }
 
 // buildRemoteCmd is the command the iTerm tab (or current terminal) runs
-// first: open SSH into a clean interactive screen session. No setup happens
-// inside screen anymore — that's done by runSetup before the tab opens.
+// first: connect to an interactive screen session. No setup happens inside
+// screen — that's done by runSetup before the tab opens. When cfg.Server is
+// "" the commands run locally without SSH.
 func buildRemoteCmd(cfg *config.Config, mode Mode, handle, sessionName, existingSessID string) string {
+	if cfg.Server == "" {
+		switch mode {
+		case ModeFullTask, ModeWorktree:
+			if existingSessID != "" {
+				return fmt.Sprintf("screen -r %s", existingSessID)
+			}
+			return fmt.Sprintf("screen -S %s bash -l", sessionName)
+		case ModeHandleSession:
+			return fmt.Sprintf("screen -S %s bash -c 'cd %s && exec bash -l'", sessionName, cfg.RemoteRepo)
+		case ModeBareSession:
+			return fmt.Sprintf("cd %s && exec bash -l", cfg.RemoteRepo)
+		}
+		return ""
+	}
 	switch mode {
 	case ModeFullTask, ModeWorktree:
 		if existingSessID != "" {

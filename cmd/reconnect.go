@@ -17,8 +17,7 @@ import (
 const reconnectUsage = `usage:
   clorchestrate reconnect [<config>] [--force]
 
-Without <config>: reconnect all sessions for every config in ~/.clorchestrate/
-that has a 'server' field set.
+Without <config>: reconnect all sessions for every config in ~/.clorchestrate/.
 With <config>: reconnect only sessions belonging to that config.
 
 By default only Detached sessions are reattached (via 'screen -r'), so
@@ -74,12 +73,9 @@ func RunReconnect(args []string, stderr io.Writer) error {
 		}
 	}
 
-	// Group by server to SSH once per unique server.
+	// Group by server to SSH once per unique server. Empty server key = local.
 	byServer := map[string][]configEntry{}
 	for _, e := range entries {
-		if e.cfg.Server == "" {
-			continue
-		}
 		byServer[e.cfg.Server] = append(byServer[e.cfg.Server], e)
 	}
 
@@ -111,7 +107,12 @@ func RunReconnect(args []string, stderr io.Writer) error {
 					fmt.Fprintf(stderr, "skipping %s (%s) — pass --force to reattach\n", sess.name, sess.state)
 					continue
 				}
-				reconnectCmd := fmt.Sprintf(`ssh -t %s "%s '%s'"`, server, screenAction, sess.name)
+				var reconnectCmd string
+				if server == "" {
+					reconnectCmd = fmt.Sprintf("%s '%s'", screenAction, sess.name)
+				} else {
+					reconnectCmd = fmt.Sprintf(`ssh -t %s "%s '%s'"`, server, screenAction, sess.name)
+				}
 				if err := iterm.OpenTab(iterm.TabOptions{
 					TabColorHex: tabColor,
 					RemoteCmd:   reconnectCmd,
@@ -156,7 +157,12 @@ func loadAllConfigs() ([]configEntry, error) {
 
 func listScreenSessions(server string) ([]screenSession, error) {
 	// screen -ls exits non-zero even when sessions exist; ignore exit code.
-	out, _ := exec.Command("ssh", server, "screen -ls").CombinedOutput()
+	var out []byte
+	if server == "" {
+		out, _ = exec.Command("screen", "-ls").CombinedOutput()
+	} else {
+		out, _ = exec.Command("ssh", server, "screen -ls").CombinedOutput()
+	}
 	return parseScreenLs(string(out)), nil
 }
 

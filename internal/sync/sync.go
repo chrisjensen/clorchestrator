@@ -53,11 +53,15 @@ func SyncScripts(server string, scripts []Script, r Runner, log func(format stri
 		if err != nil {
 			return fmt.Errorf("hash check for %s: %w", s.Name, err)
 		}
+		target := server
+		if target == "" {
+			target = "local"
+		}
 		if gotHash == wantHash {
-			log("Script %s up to date on %s\n", s.Name, server)
+			log("Script %s up to date on %s\n", s.Name, target)
 			continue
 		}
-		log("Syncing %s to %s (remote: %s, local: %s)\n", s.Name, server, shortHash(gotHash), shortHash(wantHash))
+		log("Syncing %s to %s (current: %s, want: %s)\n", s.Name, target, shortHash(gotHash), shortHash(wantHash))
 		if err := ensureRemoteBinDir(r, server); err != nil {
 			return err
 		}
@@ -68,8 +72,20 @@ func SyncScripts(server string, scripts []Script, r Runner, log func(format stri
 	return nil
 }
 
-// remoteHash returns the sha256 hex of the remote script, or "" if missing.
+// remoteHash returns the sha256 hex of the script at remotePath, or "" if
+// missing. When server is "" it reads the local file directly.
 func remoteHash(r Runner, server, remotePath string) (string, error) {
+	if server == "" {
+		localPath := expandHome(remotePath)
+		content, err := os.ReadFile(localPath)
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("read local script %s: %w", localPath, err)
+		}
+		return sha256Hex(content), nil
+	}
 	// shasum -a 256 works on macOS and Linux (sha256sum is Linux-only).
 	cmd := fmt.Sprintf(`if [ -f %s ]; then shasum -a 256 %s 2>/dev/null | awk '{print $1}'; else echo MISSING; fi`, remotePath, remotePath)
 	out, err := r.Run("ssh", []string{server, cmd}, nil)
@@ -91,6 +107,13 @@ func remoteHash(r Runner, server, remotePath string) (string, error) {
 }
 
 func ensureRemoteBinDir(r Runner, server string) error {
+	if server == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve home dir: %w", err)
+		}
+		return os.MkdirAll(filepath.Join(home, "bin"), 0755)
+	}
 	out, err := r.Run("ssh", []string{server, "mkdir -p ~/bin"}, nil)
 	if err != nil {
 		return fmt.Errorf("mkdir ~/bin on %s: %w: %s", server, err, string(out))
@@ -99,6 +122,14 @@ func ensureRemoteBinDir(r Runner, server string) error {
 }
 
 func uploadScript(r Runner, server string, s Script, remotePath string) error {
+	if server == "" {
+		localPath := expandHome(remotePath)
+		if err := os.WriteFile(localPath, s.Content, 0755); err != nil {
+			return fmt.Errorf("write local script %s: %w", localPath, err)
+		}
+		return nil
+	}
+
 	tmp, err := os.CreateTemp("", "clorchestrate-*-"+s.Name)
 	if err != nil {
 		return err
@@ -122,6 +153,18 @@ func uploadScript(r Runner, server string, s Script, remotePath string) error {
 		return fmt.Errorf("chmod: %w: %s", err, string(out))
 	}
 	return nil
+}
+
+// expandHome replaces a leading ~/ with the user's home directory.
+func expandHome(path string) string {
+	if !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, path[2:])
 }
 
 func isHex(s string) bool {
