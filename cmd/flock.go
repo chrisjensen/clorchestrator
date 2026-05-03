@@ -117,7 +117,6 @@ func RunFlock(args []string, stderr io.Writer) error {
 // startServices opens one persistent iTerm tab per service that has a start_cmd,
 // unless that service's screen session is already running on the server.
 func startServices(cfg *config.Config, configID, configPath string, stderr io.Writer) error {
-	tabColor := config.ResolveTabColor(cfg.ITermTabColor, configPath)
 	for _, svc := range cfg.Services {
 		if svc.StartCmd == "" {
 			continue
@@ -129,8 +128,25 @@ func startServices(cfg *config.Config, configID, configPath string, stderr io.Wr
 			continue
 		}
 		fmt.Fprintf(stderr, "Starting service %q in session %s\n", svc.Name, sessionName)
-		remoteCmd := fmt.Sprintf(`ssh -t %s "screen -S %s bash -lc 'cd %s && %s'"`,
-			cfg.Server, sessionName, svc.RemoteRepo, svc.StartCmd)
+
+		// Runner color: service_runner_color → service iterm_tab_color → global iterm_tab_color
+		runnerColorRaw := svc.ServiceRunnerColor
+		if runnerColorRaw == "" {
+			runnerColorRaw = svc.ITermTabColor
+		}
+		if runnerColorRaw == "" {
+			runnerColorRaw = cfg.ITermTabColor
+		}
+		tabColor := config.ResolveTabColor(runnerColorRaw, configPath)
+
+		var remoteCmd string
+		if cfg.Server == "" {
+			remoteCmd = fmt.Sprintf("screen -S %s bash -lc 'cd %s && %s'",
+				sessionName, svc.RemoteRepo, svc.StartCmd)
+		} else {
+			remoteCmd = fmt.Sprintf(`ssh -t %s "screen -S %s bash -lc 'cd %s && %s'"`,
+				cfg.Server, sessionName, svc.RemoteRepo, svc.StartCmd)
+		}
 		if err := iterm.OpenTab(iterm.TabOptions{
 			TabColorHex: tabColor,
 			RemoteCmd:   remoteCmd,

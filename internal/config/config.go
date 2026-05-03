@@ -42,13 +42,15 @@ func ResolveTabColor(rawValue, configPath string) string {
 // Service describes a subsystem within a project that may have its own repo,
 // setup command, and optionally a persistent process (start_cmd).
 type Service struct {
-	Name         string `toml:"name"`
-	RemoteRepo   string `toml:"remote_repo"`
-	IssueRepo    string `toml:"issue_repo"`
-	BranchRepo   string `toml:"branch_repo"`
-	DefaultBase  string `toml:"default_base"`
-	PostSetupCmd string `toml:"post_setup_cmd"`
-	StartCmd     string `toml:"start_cmd"`
+	Name               string `toml:"name"`
+	RemoteRepo         string `toml:"remote_repo"`
+	IssueRepo          string `toml:"issue_repo"`
+	BranchRepo         string `toml:"branch_repo"`
+	DefaultBase        string `toml:"default_base"`
+	PostSetupCmd       string `toml:"post_setup_cmd"`
+	StartCmd           string `toml:"start_cmd"`
+	ITermTabColor      string `toml:"iterm_tab_color"`       // color for claude/work sessions on this service
+	ServiceRunnerColor string `toml:"service_runner_color"`  // color for the start_cmd runner session
 }
 
 type Config struct {
@@ -91,6 +93,9 @@ func (c *Config) ResolveService(name string) (*Config, error) {
 			}
 			if svc.PostSetupCmd != "" {
 				resolved.PostSetupCmd = svc.PostSetupCmd
+			}
+			if svc.ITermTabColor != "" {
+				resolved.ITermTabColor = svc.ITermTabColor
 			}
 			return &resolved, nil
 		}
