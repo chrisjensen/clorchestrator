@@ -2,9 +2,7 @@ package cmd
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +14,7 @@ import (
 	"github.com/chrisjensen/clorchestrate/internal/sync"
 	"github.com/chrisjensen/clorchestrate/internal/taskfile"
 	"github.com/chrisjensen/clorchestrate/scripts"
+	"github.com/spf13/cobra"
 )
 
 type Mode int
@@ -27,78 +26,60 @@ const (
 	ModeFullTask                     // handle+branch+issue — full task
 )
 
-const openUsage = `usage:
+type openOptions struct {
+	issue       string
+	extraContext string
+	service     string
+	openTab     bool
+	fresh       bool
+}
+
+func NewOpenCmd() *cobra.Command {
+	var opts openOptions
+	cmd := &cobra.Command{
+		Use:   "open <config> [handle] [branch]",
+		Short: "launch a Claude session",
+		Long: `Launch a session on a remote server or locally.
+
   clorchestrate open <config>                                               bare ssh session
   clorchestrate open <config> <handle>                                      screen session at default dir
   clorchestrate open <config> <handle> <branch>                             worktree + claude
   clorchestrate open <config> <handle> <branch> --issue <N|url> [flags]    full task
 
-Flags:
-  --issue <ref>          Issue ref: bare number, #NNN, org/repo#NNN, or GitHub URL
-  --extra-context <text> Extra context for the planning prompt
-  --tab                  Open a new iTerm2 tab instead of running in the current terminal
-  --fresh                Kill any existing matching screen session before launching (re-run setup)
-
 Without --tab the SSH command runs in the current terminal. Tab color (if
-DISPATCH_ITERM_TAB_COLOR is set) is applied via escape sequences in both modes.
-`
-
-func RunOpen(args []string, stderr io.Writer) error {
-	fs := flag.NewFlagSet("open", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	issue := fs.String("issue", "", "issue ref (number, #NNN, org/repo#NNN, or URL)")
-	extra := fs.String("extra-context", "", "extra context for planning prompt")
-	service := fs.String("service", "", "service name to resolve repo/setup overrides from config")
-	openTab := fs.Bool("tab", false, "open a new iTerm2 tab instead of running in current terminal")
-	fresh := fs.Bool("fresh", false, "kill any existing matching screen session before launching")
-	fs.Usage = func() { fmt.Fprint(stderr, openUsage) }
-
-	// Interleaved parser: flags may appear anywhere among positional args.
-	// Value flags consume the next token; bool flags stand alone.
-	valueFlags := map[string]bool{"--issue": true, "--extra-context": true, "--service": true}
-	var positional []string
-	var flagArgs []string
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if strings.HasPrefix(a, "--") || strings.HasPrefix(a, "-") {
-			flagArgs = append(flagArgs, a)
-			if valueFlags[a] && i+1 < len(args) {
-				i++
-				flagArgs = append(flagArgs, args[i])
+DISPATCH_ITERM_TAB_COLOR is set) is applied via escape sequences in both modes.`,
+		Args:              cobra.RangeArgs(1, 3),
+		ValidArgsFunction: completeConfigPaths,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var handle, branch string
+			if len(args) >= 2 {
+				handle = strings.ReplaceAll(args[1], " ", "-")
 			}
-		} else {
-			positional = append(positional, a)
-		}
+			if len(args) >= 3 {
+				branch = args[2]
+			}
+			return openRun(args[0], handle, branch, opts)
+		},
 	}
-	if err := fs.Parse(flagArgs); err != nil {
-		return err
-	}
+	cmd.Flags().StringVar(&opts.issue, "issue", "", "issue ref (number, #NNN, org/repo#NNN, or URL)")
+	cmd.Flags().StringVar(&opts.extraContext, "extra-context", "", "extra context for planning prompt")
+	cmd.Flags().StringVar(&opts.service, "service", "", "service name to resolve repo/setup overrides from config")
+	cmd.Flags().BoolVar(&opts.openTab, "tab", false, "open a new iTerm2 tab instead of running in current terminal")
+	cmd.Flags().BoolVar(&opts.fresh, "fresh", false, "kill any existing matching screen session before launching")
+	return cmd
+}
 
-	if len(positional) < 1 {
-		fs.Usage()
-		return fmt.Errorf("missing <config>")
-	}
-	configPath, err := resolveConfigPath(positional[0])
+func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
+	configPath, err := resolveConfigPath(rawConfigPath)
 	if err != nil {
 		return err
-	}
-	var handle, branch string
-	if len(positional) >= 2 {
-		handle = strings.ReplaceAll(positional[1], " ", "-")
-	}
-	if len(positional) >= 3 {
-		branch = positional[2]
-	}
-	if len(positional) > 3 {
-		fs.Usage()
-		return fmt.Errorf("too many positional arguments")
 	}
 
 	baseCfg, err := config.Parse(configPath)
 	if err != nil {
 		return err
 	}
-	cfg, err := baseCfg.ResolveService(*service)
+	cfg, err := baseCfg.ResolveService(opts.service)
 	if err != nil {
 		return err
 	}
@@ -108,8 +89,8 @@ func RunOpen(args []string, stderr io.Writer) error {
 	}
 
 	issueNum := ""
-	if *issue != "" {
-		n, err := taskfile.NormalizeIssueArg(*issue)
+	if opts.issue != "" {
+		n, err := taskfile.NormalizeIssueArg(opts.issue)
 		if err != nil {
 			return err
 		}
@@ -118,7 +99,6 @@ func RunOpen(args []string, stderr io.Writer) error {
 
 	mode, err := detectMode(handle, branch, issueNum)
 	if err != nil {
-		fs.Usage()
 		return err
 	}
 
@@ -130,35 +110,32 @@ func RunOpen(args []string, stderr io.Writer) error {
 	var existingSessID string
 	if mode == ModeFullTask || mode == ModeWorktree {
 		sessionName := configID + "_" + handle
-		if *fresh {
+		if opts.fresh {
 			if id, _ := findExistingSession(cfg.Server, sessionName); id != "" {
-				fmt.Fprintf(stderr, "--fresh: killing existing screen session %s (%s)\n", sessionName, id)
+				fmt.Fprintf(os.Stderr, "--fresh: killing existing screen session %s (%s)\n", sessionName, id)
 				if err := killSession(cfg.Server, id); err != nil {
-					fmt.Fprintf(stderr, "  warning: kill failed: %v\n", err)
+					fmt.Fprintf(os.Stderr, "  warning: kill failed: %v\n", err)
 				}
 			}
 		}
 		id, state := findExistingSession(cfg.Server, sessionName)
 		if id != "" && state != "Detached" {
-			fmt.Fprintf(stderr, "screen session %s exists but is %s — skipping (use --fresh to take over)\n", sessionName, state)
+			fmt.Fprintf(os.Stderr, "screen session %s exists but is %s — skipping (use --fresh to take over)\n", sessionName, state)
 			return nil
 		}
 		existingSessID = id
 		if existingSessID != "" {
-			fmt.Fprintf(stderr, "screen session %s exists and is Detached (%s) — reattaching (re-run with --fresh to start over)\n", sessionName, existingSessID)
+			fmt.Fprintf(os.Stderr, "screen session %s exists and is Detached (%s) — reattaching (re-run with --fresh to start over)\n", sessionName, existingSessID)
 		}
 	}
 
-	// Setup phase: only when creating a fresh session for a worktree/full-task.
-	// Streams output to the local terminal so setup failures surface before
-	// any screen session exists.
 	if (mode == ModeFullTask || mode == ModeWorktree) && existingSessID == "" {
 		location := cfg.Server
 		if location == "" {
 			location = "local"
 		}
-		fmt.Fprintf(stderr, "Running setup for %s on %s…\n", handle, location)
-		if err := syncServerScripts(cfg.Server, stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "Running setup for %s on %s…\n", handle, location)
+		if err := syncServerScripts(cfg.Server); err != nil {
 			return err
 		}
 		tc := conffile.TaskConf{
@@ -174,7 +151,7 @@ func RunOpen(args []string, stderr io.Writer) error {
 			return err
 		}
 		if mode == ModeFullTask {
-			prompt := buildPrompt(issueNum, cfg.IssueRepo, cfg.PlanningContext, *extra)
+			prompt := buildPrompt(issueNum, cfg.IssueRepo, cfg.PlanningContext, opts.extraContext)
 			if err := writePromptFile(cfg.Server, handle, prompt); err != nil {
 				return err
 			}
@@ -182,7 +159,7 @@ func RunOpen(args []string, stderr io.Writer) error {
 		if err := runSetup(cfg.Server, handle); err != nil {
 			return fmt.Errorf("setup failed: %w", err)
 		}
-		fmt.Fprintln(stderr, "Setup complete — launching session.")
+		fmt.Fprintln(os.Stderr, "Setup complete — launching session.")
 	}
 
 	sessionName := configID + "_" + handle
@@ -191,7 +168,7 @@ func RunOpen(args []string, stderr io.Writer) error {
 	followup := buildFollowupCmd(mode, handle, worktreeDir, existingSessID)
 
 	tabColor := config.ResolveTabColor(cfg.ITermTabColor, configPath)
-	if *openTab {
+	if opts.openTab {
 		return iterm.OpenTab(iterm.TabOptions{
 			TabColorHex: tabColor,
 			RemoteCmd:   remoteCmd,
@@ -199,6 +176,28 @@ func RunOpen(args []string, stderr io.Writer) error {
 		})
 	}
 	return runInCurrentTerminal(tabColor, remoteCmd)
+}
+
+// completeConfigPaths returns bare config names from ~/.clorchestrate/ for the first positional arg.
+func completeConfigPaths(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveDefault
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveError
+	}
+	entries, err := os.ReadDir(filepath.Join(home, ".clorchestrate"))
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".toml") {
+			names = append(names, strings.TrimSuffix(e.Name(), ".toml"))
+		}
+	}
+	return names, cobra.ShellCompDirectiveNoFileComp
 }
 
 // runInCurrentTerminal sets the tab color (if any) then runs the remote
@@ -229,14 +228,14 @@ func detectMode(handle, branch, issue string) (Mode, error) {
 	}
 }
 
-func syncServerScripts(server string, stderr io.Writer) error {
+func syncServerScripts(server string) error {
 	all := scripts.All()
 	specs := make([]sync.Script, len(all))
 	for i, s := range all {
 		specs[i] = sync.Script{Name: s.Name, Content: s.Content}
 	}
 	return sync.SyncScripts(server, specs, sync.DefaultRunner, func(format string, a ...any) {
-		fmt.Fprintf(stderr, format, a...)
+		fmt.Fprintf(os.Stderr, format, a...)
 	})
 }
 
@@ -441,4 +440,3 @@ func worktreePath(remoteRepo, branch string) string {
 	sanitized := strings.ReplaceAll(branch, "/", "-")
 	return parent + "/extractor-" + sanitized
 }
-

@@ -1,45 +1,39 @@
 package cmd
 
 import (
-	"flag"
 	"fmt"
-	"io"
+	"os"
 
 	"github.com/chrisjensen/clorchestrate/internal/config"
 	"github.com/chrisjensen/clorchestrate/internal/github"
 	"github.com/chrisjensen/clorchestrate/internal/iterm"
 	"github.com/chrisjensen/clorchestrate/internal/taskfile"
+	"github.com/spf13/cobra"
 )
 
-const flockUsage = `usage:
-  clorchestrate flock <config> <tasks.md>
+func NewFlockCmd() *cobra.Command {
+	var forceBranch, fresh bool
+	cmd := &cobra.Command{
+		Use:   "flock <config> <tasks.md>",
+		Short: "launch all sessions from a task file",
+		Long: `Iterate a markdown task file and open one iTerm2 tab per task.
 
-Iterates a markdown task file. Each '## <handle>' section must reference a
-GitHub issue (via #NNN, org/repo#NNN, or a GitHub URL). A 'base: <ref>' line
-overrides the default base branch. Runs 'gh issue develop' per task and opens
-one iTerm2 tab per task with a pre-configured Claude session.
-
-Flags:
-  --force-branch  Always create a new branch (fail if one already exists)
-  --fresh         Kill any existing matching screen session and re-run setup
-`
-
-func RunFlock(args []string, stderr io.Writer) error {
-	fs := flag.NewFlagSet("flock", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	forceBranch := fs.Bool("force-branch", false, "always create a new branch")
-	fresh := fs.Bool("fresh", false, "kill any existing matching screen session before launching")
-	fs.Usage = func() { fmt.Fprint(stderr, flockUsage) }
-	if err := fs.Parse(args); err != nil {
-		return err
+Each '## <handle>' section must reference a GitHub issue (via #NNN,
+org/repo#NNN, or a GitHub URL). A 'base: <ref>' line overrides the default
+base branch. Runs 'gh issue develop' per task and opens one iTerm2 tab per
+task with a pre-configured Claude session.`,
+		Args:              cobra.ExactArgs(2),
+		ValidArgsFunction: completeConfigPaths,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return flockRun(args[0], args[1], forceBranch, fresh)
+		},
 	}
-	if fs.NArg() != 2 {
-		fs.Usage()
-		return fmt.Errorf("expected <config> <tasks.md>")
-	}
-	configPath := fs.Arg(0)
-	tasksPath := fs.Arg(1)
+	cmd.Flags().BoolVar(&forceBranch, "force-branch", false, "always create a new branch (fail if one already exists)")
+	cmd.Flags().BoolVar(&fresh, "fresh", false, "kill any existing matching screen session before launching")
+	return cmd
+}
 
+func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
 	cfg, err := config.Parse(configPath)
 	if err != nil {
 		return err
@@ -54,7 +48,7 @@ func RunFlock(args []string, stderr io.Writer) error {
 		return err
 	}
 
-	if err := startServices(cfg, configID, configPath, stderr); err != nil {
+	if err := startServices(cfg, configID, configPath); err != nil {
 		return err
 	}
 
@@ -69,19 +63,19 @@ func RunFlock(args []string, stderr io.Writer) error {
 			base = effectiveCfg.DefaultBase
 		}
 		var branch string
-		if !*forceBranch {
+		if !forceBranch {
 			existing, err := github.ListLinkedBranches(t.IssueNum, effectiveCfg.IssueRepo)
 			if err != nil {
 				return fmt.Errorf("task %s: list branches: %w", t.Handle, err)
 			}
 			if len(existing) > 0 {
 				branch = existing[0]
-				fmt.Fprintf(stderr, "Reusing existing branch for %q (#%s): %s\n", t.Handle, t.IssueNum, branch)
+				fmt.Fprintf(os.Stderr, "Reusing existing branch for %q (#%s): %s\n", t.Handle, t.IssueNum, branch)
 			}
 		}
 
 		if branch == "" {
-			fmt.Fprintf(stderr, "Creating branch for %q (#%s from %s)...\n", t.Handle, t.IssueNum, base)
+			fmt.Fprintf(os.Stderr, "Creating branch for %q (#%s from %s)...\n", t.Handle, t.IssueNum, base)
 			var err error
 			branch, err = github.DevelopBranch(github.DevelopArgs{
 				IssueNum:         t.IssueNum,
@@ -94,20 +88,17 @@ func RunFlock(args []string, stderr io.Writer) error {
 			if err != nil {
 				return fmt.Errorf("task %s: %w", t.Handle, err)
 			}
-			fmt.Fprintf(stderr, "  Branch: %s\n", branch)
+			fmt.Fprintf(os.Stderr, "  Branch: %s\n", branch)
 		}
 
-		startArgs := []string{configPath, t.Handle, branch, "--issue", t.IssueNum, "--tab"}
-		if *fresh {
-			startArgs = append(startArgs, "--fresh")
+		opts := openOptions{
+			issue:       t.IssueNum,
+			extraContext: t.ExtraContext,
+			service:     t.Service,
+			openTab:     true,
+			fresh:       fresh,
 		}
-		if t.ExtraContext != "" {
-			startArgs = append(startArgs, "--extra-context", t.ExtraContext)
-		}
-		if t.Service != "" {
-			startArgs = append(startArgs, "--service", t.Service)
-		}
-		if err := RunOpen(startArgs, stderr); err != nil {
+		if err := openRun(configPath, t.Handle, branch, opts); err != nil {
 			return fmt.Errorf("open for %s: %w", t.Handle, err)
 		}
 	}
@@ -116,7 +107,7 @@ func RunFlock(args []string, stderr io.Writer) error {
 
 // startServices opens one persistent iTerm tab per service that has a start_cmd,
 // unless that service's screen session is already running on the server.
-func startServices(cfg *config.Config, configID, configPath string, stderr io.Writer) error {
+func startServices(cfg *config.Config, configID, configPath string) error {
 	for _, svc := range cfg.Services {
 		if svc.StartCmd == "" {
 			continue
@@ -124,10 +115,10 @@ func startServices(cfg *config.Config, configID, configPath string, stderr io.Wr
 		sessionName := configID + "_svc_" + svc.Name
 		id, state := findExistingSession(cfg.Server, sessionName)
 		if id != "" {
-			fmt.Fprintf(stderr, "Service %q: session %s already %s — skipping\n", svc.Name, sessionName, state)
+			fmt.Fprintf(os.Stderr, "Service %q: session %s already %s — skipping\n", svc.Name, sessionName, state)
 			continue
 		}
-		fmt.Fprintf(stderr, "Starting service %q in session %s\n", svc.Name, sessionName)
+		fmt.Fprintf(os.Stderr, "Starting service %q in session %s\n", svc.Name, sessionName)
 
 		// Runner color: service_runner_color → service iterm_tab_color → global iterm_tab_color
 		runnerColorRaw := svc.ServiceRunnerColor

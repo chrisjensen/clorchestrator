@@ -1,9 +1,7 @@
 package cmd
 
 import (
-	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,19 +10,8 @@ import (
 
 	"github.com/chrisjensen/clorchestrate/internal/config"
 	"github.com/chrisjensen/clorchestrate/internal/iterm"
+	"github.com/spf13/cobra"
 )
-
-const reconnectUsage = `usage:
-  clorchestrate reconnect [<config>] [--force]
-
-Without <config>: reconnect all sessions for every config in ~/.clorchestrate/.
-With <config>: reconnect only sessions belonging to that config.
-
-By default only Detached sessions are reattached (via 'screen -r'), so
-sessions already open in another tab are left alone. Pass --force to
-forcibly reattach any matching session (via 'screen -dr'), detaching any
-currently-connected client.
-`
 
 type screenSession struct {
 	name  string
@@ -36,23 +23,34 @@ type configEntry struct {
 	cfg  *config.Config
 }
 
-func RunReconnect(args []string, stderr io.Writer) error {
-	fs := flag.NewFlagSet("reconnect", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	force := fs.Bool("force", false, "forcibly reattach matching sessions using 'screen -dr'")
-	fs.Usage = func() { fmt.Fprint(stderr, reconnectUsage) }
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	positional := fs.Args()
-	if len(positional) > 1 {
-		fs.Usage()
-		return fmt.Errorf("too many arguments")
-	}
+func NewReconnectCmd() *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "reconnect [config]",
+		Short: "reconnect detached screen sessions",
+		Long: `Reconnect detached or attached screen sessions in new iTerm2 tabs.
 
+Without <config>: reconnect all sessions for every config in ~/.clorchestrate/.
+With <config>: reconnect only sessions belonging to that config.
+
+By default only Detached sessions are reattached (via 'screen -r'), so
+sessions already open in another tab are left alone. Pass --force to
+forcibly reattach any matching session (via 'screen -dr'), detaching any
+currently-connected client.`,
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeConfigPaths,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return reconnectRun(args, force)
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "forcibly reattach matching sessions using 'screen -dr'")
+	return cmd
+}
+
+func reconnectRun(args []string, force bool) error {
 	var entries []configEntry
-	if len(positional) == 1 {
-		configPath, err := resolveConfigPath(positional[0])
+	if len(args) == 1 {
+		configPath, err := resolveConfigPath(args[0])
 		if err != nil {
 			return err
 		}
@@ -68,7 +66,7 @@ func RunReconnect(args []string, stderr io.Writer) error {
 			return err
 		}
 		if len(entries) == 0 {
-			fmt.Fprintln(stderr, "no configs found in ~/.clorchestrate/")
+			fmt.Fprintln(os.Stderr, "no configs found in ~/.clorchestrate/")
 			return nil
 		}
 	}
@@ -82,29 +80,29 @@ func RunReconnect(args []string, stderr io.Writer) error {
 	for server, serverEntries := range byServer {
 		sessions, err := listScreenSessions(server)
 		if err != nil {
-			fmt.Fprintf(stderr, "warning: could not list sessions on %s: %v\n", server, err)
+			fmt.Fprintf(os.Stderr, "warning: could not list sessions on %s: %v\n", server, err)
 			continue
 		}
 
 		for _, e := range serverEntries {
 			configID, err := config.ConfigID(e.path)
 			if err != nil {
-				fmt.Fprintf(stderr, "warning: could not determine config ID for %s: %v\n", e.path, err)
+				fmt.Fprintf(os.Stderr, "warning: could not determine config ID for %s: %v\n", e.path, err)
 				continue
 			}
 			prefix := configID + "_"
 			tabColor := config.ResolveTabColor(e.cfg.ITermTabColor, e.path)
 
 			screenAction := "screen -r"
-			if *force {
+			if force {
 				screenAction = "screen -dr"
 			}
 			for _, sess := range sessions {
 				if !strings.HasPrefix(sess.name, prefix) {
 					continue
 				}
-				if !*force && sess.state != "Detached" {
-					fmt.Fprintf(stderr, "skipping %s (%s) — pass --force to reattach\n", sess.name, sess.state)
+				if !force && sess.state != "Detached" {
+					fmt.Fprintf(os.Stderr, "skipping %s (%s) — pass --force to reattach\n", sess.name, sess.state)
 					continue
 				}
 				var reconnectCmd string
@@ -117,7 +115,7 @@ func RunReconnect(args []string, stderr io.Writer) error {
 					TabColorHex: tabColor,
 					RemoteCmd:   reconnectCmd,
 				}); err != nil {
-					fmt.Fprintf(stderr, "warning: could not open tab for session %s: %v\n", sess.name, err)
+					fmt.Fprintf(os.Stderr, "warning: could not open tab for session %s: %v\n", sess.name, err)
 				}
 			}
 		}
