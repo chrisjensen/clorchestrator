@@ -3,7 +3,7 @@
 # Usage: worktree-checkout.sh <handle>
 # Sources /tmp/task-<handle>.conf for BRANCH / REMOTE_REPO / POST_SETUP_CMD.
 # Does essential setup synchronously, then kicks off heavy work (node_modules
-# copy, post-setup build) into a detached background job logged to
+# symlink, post-setup build) into a detached background job logged to
 # <worktree>/.setup.log. Intended to be run via plain (non-tty) SSH.
 set -euo pipefail
 
@@ -26,9 +26,9 @@ start_background_setup() {
   echo "Background setup starting: tail -f $WORKTREE_DIR/.setup.log"
   (
     cd "$WORKTREE_DIR"
-    if [[ -d "$REPO_ROOT/node_modules" ]] && [[ ! -d "$WORKTREE_DIR/node_modules" ]]; then
-      echo "Copying node_modules..."
-      cp -r "$REPO_ROOT/node_modules" "$WORKTREE_DIR/"
+    if [[ -d "$REPO_ROOT/node_modules" ]] && [[ ! -e "$WORKTREE_DIR/node_modules" ]]; then
+      echo "Symlinking node_modules..."
+      ln -s "$REPO_ROOT/node_modules" "$WORKTREE_DIR/node_modules"
     fi
     if [[ -n "$POST_SETUP_CMD" ]]; then
       echo "Running post-setup: $POST_SETUP_CMD"
