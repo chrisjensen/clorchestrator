@@ -39,9 +39,9 @@ func ResolveTabColor(rawValue, configPath string) string {
 	return defaultTabColors[h.Sum32()%uint32(len(defaultTabColors))]
 }
 
-// Service describes a subsystem within a project that may have its own repo,
+// Package describes a library or package within a project that may have its own repo,
 // setup command, and optionally a persistent process (start_cmd).
-type Service struct {
+type Package struct {
 	Name               string `toml:"name"`
 	RemoteRepo         string `toml:"remote_repo"`
 	IssueRepo          string `toml:"issue_repo"`
@@ -49,8 +49,9 @@ type Service struct {
 	DefaultBase        string `toml:"default_base"`
 	PostSetupCmd       string `toml:"post_setup_cmd"`
 	StartCmd           string `toml:"start_cmd"`
-	ITermTabColor      string `toml:"iterm_tab_color"`       // color for claude/work sessions on this service
-	ServiceRunnerColor string `toml:"service_runner_color"`  // color for the start_cmd runner session
+	WorktreePrefix     string `toml:"worktree_prefix"`
+	ITermTabColor      string `toml:"iterm_tab_color"`      // color for claude/work sessions on this package
+	PackageRunnerColor string `toml:"package_runner_color"` // color for the start_cmd runner session
 }
 
 type Config struct {
@@ -61,46 +62,50 @@ type Config struct {
 	DefaultBase      string    `toml:"default_base"`
 	BranchNameFormat string    `toml:"branch_name_format"`
 	PostSetupCmd     string    `toml:"post_setup_cmd"`
+	WorktreePrefix   string    `toml:"worktree_prefix"`
 	ITermTabColor    string    `toml:"iterm_tab_color"`
 	PlanningContext  string    `toml:"planning_context"`
 	DispatchMode     string    `toml:"dispatch_mode"`
 	ID               string    `toml:"id"`
-	Services         []Service `toml:"service"`
+	Packages         []Package `toml:"package"`
 }
 
-// ResolveService returns a copy of the config with the named service's fields
-// overlaid. Fields set on the service override the global value; unset fields
+// ResolvePackage returns a copy of the config with the named package's fields
+// overlaid. Fields set on the package override the global value; unset fields
 // fall back to the global value. Returns the config unchanged when name is
-// empty (backward-compatible with configs that have no [[service]] blocks).
-func (c *Config) ResolveService(name string) (*Config, error) {
+// empty (backward-compatible with configs that have no [[package]] blocks).
+func (c *Config) ResolvePackage(name string) (*Config, error) {
 	if name == "" {
 		return c, nil
 	}
-	for _, svc := range c.Services {
-		if svc.Name == name {
+	for _, pkg := range c.Packages {
+		if pkg.Name == name {
 			resolved := *c
-			if svc.RemoteRepo != "" {
-				resolved.RemoteRepo = svc.RemoteRepo
+			if pkg.RemoteRepo != "" {
+				resolved.RemoteRepo = pkg.RemoteRepo
 			}
-			if svc.IssueRepo != "" {
-				resolved.IssueRepo = svc.IssueRepo
+			if pkg.IssueRepo != "" {
+				resolved.IssueRepo = pkg.IssueRepo
 			}
-			if svc.BranchRepo != "" {
-				resolved.BranchRepo = svc.BranchRepo
+			if pkg.BranchRepo != "" {
+				resolved.BranchRepo = pkg.BranchRepo
 			}
-			if svc.DefaultBase != "" {
-				resolved.DefaultBase = svc.DefaultBase
+			if pkg.DefaultBase != "" {
+				resolved.DefaultBase = pkg.DefaultBase
 			}
-			if svc.PostSetupCmd != "" {
-				resolved.PostSetupCmd = svc.PostSetupCmd
+			if pkg.PostSetupCmd != "" {
+				resolved.PostSetupCmd = pkg.PostSetupCmd
 			}
-			if svc.ITermTabColor != "" {
-				resolved.ITermTabColor = svc.ITermTabColor
+			if pkg.ITermTabColor != "" {
+				resolved.ITermTabColor = pkg.ITermTabColor
+			}
+			if pkg.WorktreePrefix != "" {
+				resolved.WorktreePrefix = pkg.WorktreePrefix
 			}
 			return &resolved, nil
 		}
 	}
-	return nil, fmt.Errorf("service %q not found in config", name)
+	return nil, fmt.Errorf("package %q not found in config", name)
 }
 
 // ConfigID returns the effective identifier for the config at configPath.

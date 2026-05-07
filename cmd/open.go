@@ -27,11 +27,11 @@ const (
 )
 
 type openOptions struct {
-	issue       string
+	issue        string
 	extraContext string
-	service     string
-	openTab     bool
-	fresh       bool
+	pkg          string
+	openTab      bool
+	fresh        bool
 }
 
 func NewOpenCmd() *cobra.Command {
@@ -63,7 +63,7 @@ DISPATCH_ITERM_TAB_COLOR is set) is applied via escape sequences in both modes.`
 	}
 	cmd.Flags().StringVar(&opts.issue, "issue", "", "issue ref (number, #NNN, org/repo#NNN, or URL)")
 	cmd.Flags().StringVar(&opts.extraContext, "extra-context", "", "extra context for planning prompt")
-	cmd.Flags().StringVar(&opts.service, "service", "", "service name to resolve repo/setup overrides from config")
+	cmd.Flags().StringVar(&opts.pkg, "package", "", "package name to resolve repo/setup overrides from config")
 	cmd.Flags().BoolVar(&opts.openTab, "tab", false, "open a new iTerm2 tab instead of running in current terminal")
 	cmd.Flags().BoolVar(&opts.fresh, "fresh", false, "kill any existing matching screen session before launching")
 	return cmd
@@ -79,7 +79,7 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := baseCfg.ResolveService(opts.service)
+	cfg, err := baseCfg.ResolvePackage(opts.pkg)
 	if err != nil {
 		return err
 	}
@@ -139,9 +139,10 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 			return err
 		}
 		tc := conffile.TaskConf{
-			Branch:       branch,
-			RemoteRepo:   cfg.RemoteRepo,
-			PostSetupCmd: cfg.PostSetupCmd,
+			Branch:         branch,
+			RemoteRepo:     cfg.RemoteRepo,
+			WorktreePrefix: cfg.WorktreePrefix,
+			PostSetupCmd:   cfg.PostSetupCmd,
 		}
 		if mode == ModeFullTask {
 			tc.Issue = issueNum
@@ -164,7 +165,7 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 
 	sessionName := configID + "_" + handle
 	remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID)
-	worktreeDir := worktreePath(cfg.RemoteRepo, branch)
+	worktreeDir := worktreePath(cfg.RemoteRepo, branch, cfg.WorktreePrefix)
 	followup := buildFollowupCmd(mode, handle, worktreeDir, existingSessID)
 
 	tabColor := config.ResolveTabColor(cfg.ITermTabColor, configPath)
@@ -427,16 +428,20 @@ func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string) str
 }
 
 // worktreePath mirrors the layout used by scripts/worktree-checkout.sh:
-// $(dirname REMOTE_REPO)/extractor-<sanitized-branch>. The server will
-// expand ~ (tilde) when the command runs, so it's safe to leave raw here.
-func worktreePath(remoteRepo, branch string) string {
+// $(dirname REMOTE_REPO)/<prefix>-<sanitized-branch>. prefix defaults to the
+// repo basename when empty. The server will expand ~ when the command runs.
+func worktreePath(remoteRepo, branch, prefix string) string {
 	repo := strings.TrimRight(remoteRepo, "/")
 	parent := "."
-	if i := strings.LastIndex(repo, "/"); i > 0 {
-		parent = repo[:i]
-	} else if i == 0 {
+	lastSlash := strings.LastIndex(repo, "/")
+	if lastSlash > 0 {
+		parent = repo[:lastSlash]
+	} else if lastSlash == 0 {
 		parent = "/"
 	}
+	if prefix == "" {
+		prefix = repo[lastSlash+1:]
+	}
 	sanitized := strings.ReplaceAll(branch, "/", "-")
-	return parent + "/extractor-" + sanitized
+	return parent + "/" + prefix + "-" + sanitized
 }

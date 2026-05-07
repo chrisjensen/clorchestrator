@@ -48,12 +48,12 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
 		return err
 	}
 
-	if err := startServices(cfg, configID, configPath); err != nil {
+	if err := startPackages(cfg, configID, configPath); err != nil {
 		return err
 	}
 
 	for _, t := range tasks {
-		effectiveCfg, err := cfg.ResolveService(t.Service)
+		effectiveCfg, err := cfg.ResolvePackage(t.Package)
 		if err != nil {
 			return fmt.Errorf("task %s: %w", t.Handle, err)
 		}
@@ -92,11 +92,11 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
 		}
 
 		opts := openOptions{
-			issue:       t.IssueNum,
+			issue:        t.IssueNum,
 			extraContext: t.ExtraContext,
-			service:     t.Service,
-			openTab:     true,
-			fresh:       fresh,
+			pkg:          t.Package,
+			openTab:      true,
+			fresh:        fresh,
 		}
 		if err := openRun(configPath, t.Handle, branch, opts); err != nil {
 			return fmt.Errorf("open for %s: %w", t.Handle, err)
@@ -105,25 +105,25 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
 	return nil
 }
 
-// startServices opens one persistent iTerm tab per service that has a start_cmd,
-// unless that service's screen session is already running on the server.
-func startServices(cfg *config.Config, configID, configPath string) error {
-	for _, svc := range cfg.Services {
-		if svc.StartCmd == "" {
+// startPackages opens one persistent iTerm tab per package that has a start_cmd,
+// unless that package's screen session is already running on the server.
+func startPackages(cfg *config.Config, configID, configPath string) error {
+	for _, pkg := range cfg.Packages {
+		if pkg.StartCmd == "" {
 			continue
 		}
-		sessionName := configID + "_svc_" + svc.Name
+		sessionName := configID + "_pkg_" + pkg.Name
 		id, state := findExistingSession(cfg.Server, sessionName)
 		if id != "" {
-			fmt.Fprintf(os.Stderr, "Service %q: session %s already %s — skipping\n", svc.Name, sessionName, state)
+			fmt.Fprintf(os.Stderr, "Package %q: session %s already %s — skipping\n", pkg.Name, sessionName, state)
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "Starting service %q in session %s\n", svc.Name, sessionName)
+		fmt.Fprintf(os.Stderr, "Starting package %q in session %s\n", pkg.Name, sessionName)
 
-		// Runner color: service_runner_color → service iterm_tab_color → global iterm_tab_color
-		runnerColorRaw := svc.ServiceRunnerColor
+		// Runner color: package_runner_color → package iterm_tab_color → global iterm_tab_color
+		runnerColorRaw := pkg.PackageRunnerColor
 		if runnerColorRaw == "" {
-			runnerColorRaw = svc.ITermTabColor
+			runnerColorRaw = pkg.ITermTabColor
 		}
 		if runnerColorRaw == "" {
 			runnerColorRaw = cfg.ITermTabColor
@@ -133,16 +133,16 @@ func startServices(cfg *config.Config, configID, configPath string) error {
 		var remoteCmd string
 		if cfg.Server == "" {
 			remoteCmd = fmt.Sprintf("screen -S %s bash -lc 'cd %s && %s'",
-				sessionName, svc.RemoteRepo, svc.StartCmd)
+				sessionName, pkg.RemoteRepo, pkg.StartCmd)
 		} else {
 			remoteCmd = fmt.Sprintf(`ssh -t %s "screen -S %s bash -lc 'cd %s && %s'"`,
-				cfg.Server, sessionName, svc.RemoteRepo, svc.StartCmd)
+				cfg.Server, sessionName, pkg.RemoteRepo, pkg.StartCmd)
 		}
 		if err := iterm.OpenTab(iterm.TabOptions{
 			TabColorHex: tabColor,
 			RemoteCmd:   remoteCmd,
 		}); err != nil {
-			return fmt.Errorf("open service tab for %s: %w", svc.Name, err)
+			return fmt.Errorf("open package tab for %s: %w", pkg.Name, err)
 		}
 	}
 	return nil

@@ -102,18 +102,21 @@ func TestBuildFollowupCmd(t *testing.T) {
 }
 
 func TestWorktreePath(t *testing.T) {
-	// Mirrors scripts/worktree-checkout.sh: $(dirname REMOTE_REPO)/extractor-<sanitized-branch>
+	// Mirrors scripts/worktree-checkout.sh: $(dirname REMOTE_REPO)/<prefix>-<sanitized-branch>
+	// prefix defaults to repo basename when empty.
 	cases := []struct {
-		repo, branch, want string
+		repo, branch, prefix, want string
 	}{
-		{"~/src/ncoderz/extractor", "9802-foo", "~/src/ncoderz/extractor-9802-foo"},
-		{"~/src/ncoderz/extractor/", "9802-foo", "~/src/ncoderz/extractor-9802-foo"},
-		{"~/src/ncoderz/extractor", "feature/abc", "~/src/ncoderz/extractor-feature-abc"},
-		{"/home/chris/src/repo", "x/y/z", "/home/chris/src/extractor-x-y-z"},
+		{"~/src/ncoderz/extractor", "9802-foo", "extractor", "~/src/ncoderz/extractor-9802-foo"},
+		{"~/src/ncoderz/extractor/", "9802-foo", "extractor", "~/src/ncoderz/extractor-9802-foo"},
+		{"~/src/ncoderz/extractor", "feature/abc", "extractor", "~/src/ncoderz/extractor-feature-abc"},
+		{"~/src/ncoderz/bitmark-parser-generator", "feature/abc", "parser", "~/src/ncoderz/parser-feature-abc"},
+		{"~/src/ncoderz/bitmark-parser-generator", "feature/abc", "", "~/src/ncoderz/bitmark-parser-generator-feature-abc"},
+		{"/home/chris/src/repo", "x/y/z", "myprefix", "/home/chris/src/myprefix-x-y-z"},
 	}
 	for _, c := range cases {
-		if got := worktreePath(c.repo, c.branch); got != c.want {
-			t.Errorf("worktreePath(%q, %q) = %q, want %q", c.repo, c.branch, got, c.want)
+		if got := worktreePath(c.repo, c.branch, c.prefix); got != c.want {
+			t.Errorf("worktreePath(%q, %q, %q) = %q, want %q", c.repo, c.branch, c.prefix, got, c.want)
 		}
 	}
 }

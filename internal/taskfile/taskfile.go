@@ -12,14 +12,14 @@ type Task struct {
 	Handle       string
 	IssueNum     string
 	BaseBranch   string
-	Service      string
+	Package      string
 	ExtraContext string
 }
 
 var (
 	headingRE  = regexp.MustCompile(`^##\s+(.+)$`)
 	baseRE     = regexp.MustCompile(`(?i)^base:\s*(.+)$`)
-	serviceRE  = regexp.MustCompile(`(?i)^service:\s*(\S+)$`)
+	packageRE  = regexp.MustCompile(`(?i)^package:\s*(\S+)$`)
 	// Matches: URL form, org/repo#NNN shorthand, or bare #NNN.
 	// We take the last number found in the match.
 	issueURLRE       = regexp.MustCompile(`https?://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)`)
@@ -76,7 +76,7 @@ func buildTask(handle, body string) (Task, bool) {
 		return Task{}, false
 	}
 
-	var base, service string
+	var base, pkg string
 	var contextLines []string
 	for _, line := range strings.Split(body, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -84,8 +84,8 @@ func buildTask(handle, body string) (Task, bool) {
 			base = strings.TrimSpace(m[1])
 			continue
 		}
-		if m := serviceRE.FindStringSubmatch(trimmed); m != nil {
-			service = m[1]
+		if m := packageRE.FindStringSubmatch(trimmed); m != nil {
+			pkg = m[1]
 			continue
 		}
 		contextLines = append(contextLines, line)
@@ -96,7 +96,7 @@ func buildTask(handle, body string) (Task, bool) {
 		Handle:       handle,
 		IssueNum:     issueNum,
 		BaseBranch:   base,
-		Service:      service,
+		Package:      pkg,
 		ExtraContext: extra,
 	}, true
 }
