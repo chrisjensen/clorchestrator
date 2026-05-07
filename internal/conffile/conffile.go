@@ -8,6 +8,7 @@ import (
 type TaskConf struct {
 	Branch          string
 	RemoteRepo      string
+	WorktreePrefix  string
 	Issue           string
 	IssueRepo       string
 	PostSetupCmd    string
@@ -29,6 +30,9 @@ func Render(c TaskConf) string {
 	}
 	fmt.Fprintf(&b, "BRANCH=%s\n", c.Branch)
 	fmt.Fprintf(&b, "REMOTE_REPO=%s\n", c.RemoteRepo)
+	if c.WorktreePrefix != "" {
+		fmt.Fprintf(&b, "WORKTREE_PREFIX=%s\n", c.WorktreePrefix)
+	}
 	if c.IssueRepo != "" {
 		fmt.Fprintf(&b, "ISSUE_REPO=%s\n", c.IssueRepo)
 	}
