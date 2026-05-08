@@ -107,9 +107,13 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		return err
 	}
 
+	sessionName := configID + "_" + handle
+	if opts.pkg != "" {
+		sessionName = handle
+	}
+
 	var existingSessID string
 	if mode == ModeFullTask || mode == ModeWorktree {
-		sessionName := configID + "_" + handle
 		if opts.fresh {
 			if id, _ := findExistingSession(cfg.Server, sessionName); id != "" {
 				fmt.Fprintf(os.Stderr, "--fresh: killing existing screen session %s (%s)\n", sessionName, id)
@@ -163,7 +167,6 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		fmt.Fprintln(os.Stderr, "Setup complete — launching session.")
 	}
 
-	sessionName := configID + "_" + handle
 	remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID)
 	worktreeDir := worktreePath(cfg.RemoteRepo, branch, cfg.WorktreePrefix)
 	followup := buildFollowupCmd(mode, handle, worktreeDir, existingSessID)
