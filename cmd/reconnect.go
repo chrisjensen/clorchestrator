@@ -99,7 +99,7 @@ func reconnectRun(args []string, force bool) error {
 				{prefix: configID + "_", tabColor: config.ResolveTabColor(e.cfg.ITermTabColor, e.path)},
 			}
 			for _, pkg := range e.cfg.Packages {
-				if pkg.WorktreePrefix == "" {
+				if pkg.Name == "" {
 					continue
 				}
 				pkgColor := pkg.ITermTabColor
@@ -107,7 +107,7 @@ func reconnectRun(args []string, force bool) error {
 					pkgColor = e.cfg.ITermTabColor
 				}
 				matchers = append(matchers, matcher{
-					prefix:   pkg.WorktreePrefix + "-",
+					prefix:   pkg.Name + "_",
 					tabColor: config.ResolveTabColor(pkgColor, e.path),
 				})
 			}

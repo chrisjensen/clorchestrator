@@ -109,7 +109,7 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 
 	sessionName := configID + "_" + handle
 	if opts.pkg != "" {
-		sessionName = handle
+		sessionName = opts.pkg + "_" + handle
 	}
 
 	var existingSessID string
