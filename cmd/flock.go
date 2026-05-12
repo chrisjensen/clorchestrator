@@ -3,6 +3,9 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 
 	"github.com/chrisjensen/clorchestrate/internal/config"
 	"github.com/chrisjensen/clorchestrate/internal/github"
@@ -91,18 +94,66 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
 			fmt.Fprintf(os.Stderr, "  Branch: %s\n", branch)
 		}
 
+		worktreeDir := worktreePath(effectiveCfg.RemoteRepo, branch, effectiveCfg.WorktreePrefix)
+		ahead, err := branchAheadCount(effectiveCfg.Server, worktreeDir, base)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  warning: could not check commits ahead for %s: %v — proceeding with planning session\n", branch, err)
+			ahead = 0
+		}
+		if ahead > 0 {
+			fmt.Fprintf(os.Stderr, "  Branch is %d commit(s) ahead of %s — opening shell in worktree (no Claude)\n", ahead, base)
+		}
+
 		opts := openOptions{
 			issue:        t.IssueNum,
 			extraContext: t.ExtraContext,
 			pkg:          t.Package,
 			openTab:      true,
 			fresh:        fresh,
+			noClaude:     ahead > 0,
 		}
 		if err := openRun(configPath, t.Handle, branch, opts); err != nil {
 			return fmt.Errorf("open for %s: %w", t.Handle, err)
 		}
 	}
 	return nil
+}
+
+// aheadShellCmd renders the shell snippet used by branchAheadCount. Paths are
+// interpolated unquoted so a leading "~" undergoes tilde expansion on the
+// remote shell — bash does not expand "~" inside double-quoted strings.
+func aheadShellCmd(worktreeDir, base string) string {
+	return fmt.Sprintf(
+		`if [ -d %s ]; then git -C %s rev-list --count origin/%s..HEAD; else echo MISSING; fi`,
+		worktreeDir, worktreeDir, base,
+	)
+}
+
+// branchAheadCount returns how many commits the worktree's HEAD is ahead of
+// origin/<base>, run on the server (where any unpushed commits live). Returns
+// (0, nil) when the worktree dir doesn't exist yet — that's the fresh-setup
+// path and there's no work to detect.
+func branchAheadCount(server, worktreeDir, base string) (int, error) {
+	shellCmd := aheadShellCmd(worktreeDir, base)
+	var out []byte
+	var err error
+	if server == "" {
+		out, err = exec.Command("sh", "-c", shellCmd).Output()
+	} else {
+		out, err = exec.Command("ssh", server, shellCmd).Output()
+	}
+	if err != nil {
+		return 0, fmt.Errorf("rev-list: %w", err)
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "MISSING" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("parse rev-list output %q: %w", s, err)
+	}
+	return n, nil
 }
 
 // startPackages opens one persistent iTerm tab per package that has a start_cmd,

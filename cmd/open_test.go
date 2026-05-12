@@ -37,7 +37,7 @@ func TestDetectMode(t *testing.T) {
 
 func TestBuildRemoteCmd_FullTaskFresh(t *testing.T) {
 	cfg := &config.Config{Server: "myserver"}
-	got := buildRemoteCmd(cfg, ModeFullTask, "my-handle", "mycon_my-handle", "")
+	got := buildRemoteCmd(cfg, ModeFullTask, "my-handle", "mycon_my-handle", "", "~/src/extractor-branch-x", false)
 	if !strings.Contains(got, "ssh -t myserver") {
 		t.Errorf("missing ssh -t: %s", got)
 	}
@@ -51,7 +51,7 @@ func TestBuildRemoteCmd_FullTaskFresh(t *testing.T) {
 
 func TestBuildRemoteCmd_FullTaskReattach(t *testing.T) {
 	cfg := &config.Config{Server: "myserver"}
-	got := buildRemoteCmd(cfg, ModeFullTask, "my-handle", "mycon_my-handle", "12345.mycon_my-handle")
+	got := buildRemoteCmd(cfg, ModeFullTask, "my-handle", "mycon_my-handle", "12345.mycon_my-handle", "~/src/extractor-branch-x", false)
 	if !strings.Contains(got, "screen -r 12345.mycon_my-handle") {
 		t.Errorf("expected screen -r for reattach: %s", got)
 	}
@@ -62,7 +62,7 @@ func TestBuildRemoteCmd_FullTaskReattach(t *testing.T) {
 
 func TestBuildRemoteCmd_BareSession(t *testing.T) {
 	cfg := &config.Config{Server: "myserver", RemoteRepo: "~/src/repo"}
-	got := buildRemoteCmd(cfg, ModeBareSession, "", "", "")
+	got := buildRemoteCmd(cfg, ModeBareSession, "", "", "", "", false)
 	if !strings.Contains(got, "cd ~/src/repo") {
 		t.Errorf("missing cd: %s", got)
 	}
@@ -73,7 +73,7 @@ func TestBuildRemoteCmd_BareSession(t *testing.T) {
 
 func TestBuildRemoteCmd_HandleSession(t *testing.T) {
 	cfg := &config.Config{Server: "myserver", RemoteRepo: "~/src/repo"}
-	got := buildRemoteCmd(cfg, ModeHandleSession, "my-handle", "mycon_my-handle", "")
+	got := buildRemoteCmd(cfg, ModeHandleSession, "my-handle", "mycon_my-handle", "", "", false)
 	if !strings.Contains(got, "ssh -t myserver") {
 		t.Errorf("missing ssh -t: %s", got)
 	}
@@ -85,19 +85,64 @@ func TestBuildRemoteCmd_HandleSession(t *testing.T) {
 	}
 }
 
+func TestBuildRemoteCmd_NoClaude(t *testing.T) {
+	wd := "~/src/extractor-branch-x"
+	cases := []struct {
+		name string
+		mode Mode
+	}{
+		{"ModeFullTask", ModeFullTask},
+		{"ModeWorktree", ModeWorktree},
+	}
+	for _, c := range cases {
+		t.Run("remote/"+c.name, func(t *testing.T) {
+			cfg := &config.Config{Server: "myserver"}
+			got := buildRemoteCmd(cfg, c.mode, "h", "mycon_h", "", wd, true)
+			want := `ssh -t myserver "screen -S mycon_h bash -c 'cd ~/src/extractor-branch-x && exec bash -l'"`
+			if got != want {
+				t.Errorf("got %q\nwant %q", got, want)
+			}
+		})
+		t.Run("local/"+c.name, func(t *testing.T) {
+			cfg := &config.Config{Server: ""}
+			got := buildRemoteCmd(cfg, c.mode, "h", "mycon_h", "", wd, true)
+			want := "screen -S mycon_h bash -c 'cd ~/src/extractor-branch-x && exec bash -l'"
+			if got != want {
+				t.Errorf("got %q\nwant %q", got, want)
+			}
+		})
+	}
+
+	// Reattach still wins over noClaude — an existing detached session
+	// already has whatever state the user wants to resume.
+	t.Run("reattach overrides noClaude", func(t *testing.T) {
+		cfg := &config.Config{Server: "myserver"}
+		got := buildRemoteCmd(cfg, ModeFullTask, "h", "mycon_h", "999.mycon_h", wd, true)
+		if !strings.Contains(got, "screen -r 999.mycon_h") {
+			t.Errorf("expected screen -r for reattach: %s", got)
+		}
+	})
+}
+
 func TestBuildFollowupCmd(t *testing.T) {
 	wd := "~/src/extractor-branch-x"
-	if got := buildFollowupCmd(ModeFullTask, "h", wd, ""); !strings.Contains(got, "cd ~/src/extractor-branch-x && claude --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false); !strings.Contains(got, "cd ~/src/extractor-branch-x && claude --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
 		t.Errorf("ModeFullTask fresh: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeWorktree, "h", wd, ""); got != "cd ~/src/extractor-branch-x && claude" {
+	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false); got != "cd ~/src/extractor-branch-x && claude" {
 		t.Errorf("ModeWorktree fresh: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeFullTask, "h", wd, "123.x"); got != "" {
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "123.x", false); got != "" {
 		t.Errorf("reattach should suppress followup: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeHandleSession, "h", wd, ""); got != "" {
+	if got := buildFollowupCmd(ModeHandleSession, "h", wd, "", false); got != "" {
 		t.Errorf("ModeHandleSession should have no followup: got %q", got)
+	}
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", true); got != "" {
+		t.Errorf("noClaude ModeFullTask should suppress followup: got %q", got)
+	}
+	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", true); got != "" {
+		t.Errorf("noClaude ModeWorktree should suppress followup: got %q", got)
 	}
 }
 

@@ -32,6 +32,7 @@ type openOptions struct {
 	pkg          string
 	openTab      bool
 	fresh        bool
+	noClaude     bool // open the screen session in the worktree but don't launch claude
 }
 
 func NewOpenCmd() *cobra.Command {
@@ -155,7 +156,7 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		if err := writeTaskConf(cfg.Server, handle, tc); err != nil {
 			return err
 		}
-		if mode == ModeFullTask {
+		if mode == ModeFullTask && !opts.noClaude {
 			prompt := buildPrompt(issueNum, cfg.IssueRepo, cfg.PlanningContext, opts.extraContext)
 			if err := writePromptFile(cfg.Server, handle, prompt); err != nil {
 				return err
@@ -167,9 +168,9 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		fmt.Fprintln(os.Stderr, "Setup complete — launching session.")
 	}
 
-	remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID)
 	worktreeDir := worktreePath(cfg.RemoteRepo, branch, cfg.WorktreePrefix)
-	followup := buildFollowupCmd(mode, handle, worktreeDir, existingSessID)
+	remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID, worktreeDir, opts.noClaude)
+	followup := buildFollowupCmd(mode, handle, worktreeDir, existingSessID, opts.noClaude)
 
 	tabColor := config.ResolveTabColor(cfg.ITermTabColor, configPath)
 	if opts.openTab {
@@ -378,13 +379,18 @@ func killSession(server, sessionID string) error {
 // buildRemoteCmd is the command the iTerm tab (or current terminal) runs
 // first: connect to an interactive screen session. No setup happens inside
 // screen — that's done by runSetup before the tab opens. When cfg.Server is
-// "" the commands run locally without SSH.
-func buildRemoteCmd(cfg *config.Config, mode Mode, handle, sessionName, existingSessID string) string {
+// "" the commands run locally without SSH. When noClaude is true (worktree
+// already has commits), screen cd's into worktreeDir directly so the user
+// lands at a shell in the right place — no followup is typed.
+func buildRemoteCmd(cfg *config.Config, mode Mode, handle, sessionName, existingSessID, worktreeDir string, noClaude bool) string {
 	if cfg.Server == "" {
 		switch mode {
 		case ModeFullTask, ModeWorktree:
 			if existingSessID != "" {
 				return fmt.Sprintf("screen -r %s", existingSessID)
+			}
+			if noClaude {
+				return fmt.Sprintf("screen -S %s bash -c 'cd %s && exec bash -l'", sessionName, worktreeDir)
 			}
 			return fmt.Sprintf("screen -S %s bash -l", sessionName)
 		case ModeHandleSession:
@@ -403,6 +409,10 @@ func buildRemoteCmd(cfg *config.Config, mode Mode, handle, sessionName, existing
 			return fmt.Sprintf(`ssh -t %s "screen -r %s"`,
 				cfg.Server, existingSessID)
 		}
+		if noClaude {
+			return fmt.Sprintf(`ssh -t %s "screen -S %s bash -c 'cd %s && exec bash -l'"`,
+				cfg.Server, sessionName, worktreeDir)
+		}
 		return fmt.Sprintf(`ssh -t %s "screen -S %s bash -l"`, cfg.Server, sessionName)
 	case ModeHandleSession:
 		return fmt.Sprintf(`ssh -t %s "screen -S %s bash -c 'cd %s && exec bash -l'"`,
@@ -416,9 +426,10 @@ func buildRemoteCmd(cfg *config.Config, mode Mode, handle, sessionName, existing
 // buildFollowupCmd returns the command AppleScript will type into the new tab
 // after ssh+screen are established. It cd's into the worktree first so
 // claude (and any subsequent commands after claude exits) run from there.
-// Returns "" when no followup should be typed (reattach, or non-task modes).
-func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string) string {
-	if existingSessID != "" {
+// Returns "" when no followup should be typed (reattach, non-task modes, or
+// noClaude — screen has already cd'd into the worktree in that case).
+func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string, noClaude bool) string {
+	if existingSessID != "" || noClaude {
 		return ""
 	}
 	switch mode {
