@@ -37,6 +37,11 @@ task with a pre-configured Claude session.`,
 }
 
 func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
+	configPath, err := resolveConfigPath(configPath)
+	if err != nil {
+		return err
+	}
+
 	cfg, err := config.Parse(configPath)
 	if err != nil {
 		return err
