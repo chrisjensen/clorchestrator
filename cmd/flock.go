@@ -21,10 +21,31 @@ func NewFlockCmd() *cobra.Command {
 		Short: "launch all sessions from a task file",
 		Long: `Iterate a markdown task file and open one iTerm2 tab per task.
 
-Each '## <handle>' section must reference a GitHub issue (via #NNN,
-org/repo#NNN, or a GitHub URL). A 'base: <ref>' line overrides the default
-base branch. Runs 'gh issue develop' per task and opens one iTerm2 tab per
-task with a pre-configured Claude session.`,
+Runs 'gh issue develop' per task and opens one iTerm2 tab per task with a
+pre-configured Claude session.
+
+Task file format:
+
+  ## <handle>                    Section heading. The handle names the
+                                 branch/session for this task. Required.
+
+  #NNN | org/repo#NNN | URL      Issue reference. One per section,
+                                 anywhere in the body. Required — sections
+                                 with no issue ref are skipped with a
+                                 warning.
+
+  base: <ref>                    Optional. Overrides the default base
+                                 branch for this task only.
+
+  package: <name>                Optional. Selects a [[package]] from the
+                                 config; the package's fields override the
+                                 top-level config for this task. Omit to
+                                 use the top-level config as-is. Run
+                                 'flock <config> --help' to list packages
+                                 defined in a given config.
+
+  <anything else>                Freeform context appended to the Claude
+                                 prompt for this task.`,
 		Args:              cobra.ExactArgs(2),
 		ValidArgsFunction: completeConfigPaths,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -33,7 +54,50 @@ task with a pre-configured Claude session.`,
 	}
 	cmd.Flags().BoolVar(&forceBranch, "force-branch", false, "always create a new branch (fail if one already exists)")
 	cmd.Flags().BoolVar(&fresh, "fresh", false, "kill any existing matching screen session before launching")
+
+	defaultHelp := cmd.HelpFunc()
+	cmd.SetHelpFunc(func(c *cobra.Command, args []string) {
+		defaultHelp(c, args)
+		appendPackageHelp(c, args)
+	})
 	return cmd
+}
+
+// appendPackageHelp prints the [[package]] names from the config named in
+// args (if any) under the standard help output. Silently no-ops when no
+// config arg is present or the config can't be loaded — help should never
+// fail.
+func appendPackageHelp(c *cobra.Command, args []string) {
+	var configArg string
+	var cfg *config.Config
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") || a == c.Name() {
+			continue
+		}
+		path, err := resolveConfigPath(a)
+		if err != nil {
+			continue
+		}
+		parsed, err := config.Parse(path)
+		if err != nil {
+			continue
+		}
+		configArg = a
+		cfg = parsed
+		break
+	}
+	if cfg == nil {
+		return
+	}
+	out := c.OutOrStdout()
+	fmt.Fprintf(out, "\nPackages defined in %s:\n", configArg)
+	if len(cfg.Packages) == 0 {
+		fmt.Fprintln(out, "  (none — omit 'package:' from task entries)")
+		return
+	}
+	for _, p := range cfg.Packages {
+		fmt.Fprintf(out, "  %s\n", p.Name)
+	}
 }
 
 func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
