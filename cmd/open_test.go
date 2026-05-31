@@ -126,10 +126,10 @@ func TestBuildRemoteCmd_NoClaude(t *testing.T) {
 
 func TestBuildFollowupCmd(t *testing.T) {
 	wd := "~/src/extractor-branch-x"
-	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false); !strings.Contains(got, "cd ~/src/extractor-branch-x && claude --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false); !strings.Contains(got, "cd ~/src/extractor-branch-x && claude --model opus --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
 		t.Errorf("ModeFullTask fresh: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false); got != "cd ~/src/extractor-branch-x && claude" {
+	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false); got != "cd ~/src/extractor-branch-x && claude --model opus" {
 		t.Errorf("ModeWorktree fresh: got %q", got)
 	}
 	if got := buildFollowupCmd(ModeFullTask, "h", wd, "123.x", false); got != "" {

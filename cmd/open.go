@@ -434,9 +434,9 @@ func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string, noC
 	}
 	switch mode {
 	case ModeFullTask:
-		return fmt.Sprintf(`cd %s && claude --permission-mode plan "$(cat /tmp/task-%s.prompt.md)"`, worktreeDir, handle)
+		return fmt.Sprintf(`cd %s && claude --model opus --permission-mode plan "$(cat /tmp/task-%s.prompt.md)"`, worktreeDir, handle)
 	case ModeWorktree:
-		return fmt.Sprintf(`cd %s && claude`, worktreeDir)
+		return fmt.Sprintf(`cd %s && claude --model opus`, worktreeDir)
 	}
 	return ""
 }
