@@ -54,7 +54,22 @@ cd "$REPO_ROOT"
 git fetch origin
 
 echo "Checking out $BRANCH into $WORKTREE_DIR..."
-if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+if [[ -d "$REPO_ROOT/.beads" ]]; then
+  # Beads repo: use `bd worktree create` so the new worktree shares the main
+  # repo's .beads database via a redirect. bd attaches an existing local
+  # branch but does not create one tracking origin, so set that up first to
+  # preserve the resume-a-remote-branch behaviour of the plain-git path below.
+  if ! git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+      git -C "$REPO_ROOT" branch --track "$BRANCH" "origin/$BRANCH"
+    fi
+    # else: bd creates a new branch from the current HEAD
+  fi
+  # bd lives on the login-shell PATH (like npm/claude), not the bare PATH this
+  # script gets over non-tty SSH — run it via `bash -lc` so it resolves.
+  ( cd "$REPO_ROOT" && WT="$WORKTREE_DIR" BR="$BRANCH" \
+      bash -lc 'bd worktree create "$WT" --branch="$BR"' )
+elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
   git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" "origin/$BRANCH"
 elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
   git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH"
