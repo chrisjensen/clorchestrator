@@ -115,7 +115,7 @@ context two
 	}
 }
 
-func TestParse_SkipsNoIssue(t *testing.T) {
+func TestParse_NoIssueIncluded(t *testing.T) {
 	path := writeTemp(t, `## no-issue
 Just context without any issue ref.
 
@@ -127,11 +127,70 @@ ok
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 1 {
-		t.Fatalf("got %d tasks, want 1 (skipping no-issue)", len(tasks))
+	if len(tasks) != 2 {
+		t.Fatalf("got %d tasks, want 2", len(tasks))
 	}
-	if tasks[0].Handle != "has-issue" {
+	if tasks[0].Handle != "no-issue" {
+		t.Errorf("tasks[0].Handle = %q", tasks[0].Handle)
+	}
+	if tasks[0].IssueNum != "" {
+		t.Errorf("tasks[0].IssueNum = %q, want empty", tasks[0].IssueNum)
+	}
+	if !strings.Contains(tasks[0].ExtraContext, "Just context") {
+		t.Errorf("tasks[0].ExtraContext = %q", tasks[0].ExtraContext)
+	}
+	if tasks[1].Handle != "has-issue" || tasks[1].IssueNum != "42" {
+		t.Errorf("tasks[1] = %+v", tasks[1])
+	}
+}
+
+func TestParse_NoIssueOnlyHandle(t *testing.T) {
+	path := writeTemp(t, `## my-feature
+Implement the new widget system.
+`)
+	tasks, err := Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(tasks))
+	}
+	if tasks[0].Handle != "my-feature" {
 		t.Errorf("Handle = %q", tasks[0].Handle)
+	}
+	if tasks[0].IssueNum != "" {
+		t.Errorf("IssueNum = %q, want empty", tasks[0].IssueNum)
+	}
+	if !strings.Contains(tasks[0].ExtraContext, "Implement the new widget system") {
+		t.Errorf("ExtraContext = %q", tasks[0].ExtraContext)
+	}
+}
+
+func TestParse_HeadingNoSpace(t *testing.T) {
+	path := writeTemp(t, "##handle\n#1\n")
+	tasks, err := Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(tasks))
+	}
+	if tasks[0].Handle != "handle" {
+		t.Errorf("Handle = %q, want %q", tasks[0].Handle, "handle")
+	}
+}
+
+func TestParse_HeadingExtraSpaces(t *testing.T) {
+	path := writeTemp(t, "##  handle  \n#1\n")
+	tasks, err := Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(tasks))
+	}
+	if tasks[0].Handle != "handle" {
+		t.Errorf("Handle = %q, want %q", tasks[0].Handle, "handle")
 	}
 }
 

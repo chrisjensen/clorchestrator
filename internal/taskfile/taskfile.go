@@ -17,7 +17,7 @@ type Task struct {
 }
 
 var (
-	headingRE  = regexp.MustCompile(`^##\s+(.+)$`)
+	headingRE  = regexp.MustCompile(`^##\s*(\S.*)$`)
 	baseRE     = regexp.MustCompile(`(?i)^base:\s*(.+)$`)
 	packageRE  = regexp.MustCompile(`(?i)^package:\s*(\S+)$`)
 	// Matches: URL form, org/repo#NNN shorthand, or bare #NNN.
@@ -43,12 +43,8 @@ func Parse(path string) ([]Task, error) {
 			return
 		}
 		body := curBody.String()
-		task, ok := buildTask(curHandle, body)
-		if ok {
-			tasks = append(tasks, task)
-		} else {
-			fmt.Fprintf(os.Stderr, "No issue ref found for %q, skipping\n", curHandle)
-		}
+		task := buildTask(curHandle, body)
+		tasks = append(tasks, task)
 	}
 
 	scanner := bufio.NewScanner(f)
@@ -70,11 +66,8 @@ func Parse(path string) ([]Task, error) {
 	return tasks, nil
 }
 
-func buildTask(handle, body string) (Task, bool) {
+func buildTask(handle, body string) Task {
 	issueNum := ExtractIssueNum(body)
-	if issueNum == "" {
-		return Task{}, false
-	}
 
 	var base, pkg string
 	var contextLines []string
@@ -98,7 +91,7 @@ func buildTask(handle, body string) (Task, bool) {
 		BaseBranch:   base,
 		Package:      pkg,
 		ExtraContext: extra,
-	}, true
+	}
 }
 
 // ExtractIssueNum returns the issue number from a body that may contain a GitHub

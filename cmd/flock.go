@@ -135,32 +135,41 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
 			base = effectiveCfg.DefaultBase
 		}
 		var branch string
-		if !forceBranch {
-			existing, err := github.ListLinkedBranches(t.IssueNum, effectiveCfg.IssueRepo)
-			if err != nil {
-				return fmt.Errorf("task %s: list branches: %w", t.Handle, err)
+		if t.IssueNum == "" {
+			// No issue — derive branch name from handle.
+			branch = t.Handle
+			if effectiveCfg.BranchNameFormat != "" && !strings.Contains(effectiveCfg.BranchNameFormat, "{issue}") {
+				branch = github.FormatBranchName(effectiveCfg.BranchNameFormat, "", t.Handle)
 			}
-			if len(existing) > 0 {
-				branch = existing[0]
-				fmt.Fprintf(os.Stderr, "Reusing existing branch for %q (#%s): %s\n", t.Handle, t.IssueNum, branch)
+			fmt.Fprintf(os.Stderr, "No-issue task %q — branch: %s\n", t.Handle, branch)
+		} else {
+			if !forceBranch {
+				existing, err := github.ListLinkedBranches(t.IssueNum, effectiveCfg.IssueRepo)
+				if err != nil {
+					return fmt.Errorf("task %s: list branches: %w", t.Handle, err)
+				}
+				if len(existing) > 0 {
+					branch = existing[0]
+					fmt.Fprintf(os.Stderr, "Reusing existing branch for %q (#%s): %s\n", t.Handle, t.IssueNum, branch)
+				}
 			}
-		}
 
-		if branch == "" {
-			fmt.Fprintf(os.Stderr, "Creating branch for %q (#%s from %s)...\n", t.Handle, t.IssueNum, base)
-			var err error
-			branch, err = github.DevelopBranch(github.DevelopArgs{
-				IssueNum:         t.IssueNum,
-				IssueRepo:        effectiveCfg.IssueRepo,
-				BranchRepo:       effectiveCfg.BranchRepo,
-				Base:             base,
-				BranchNameFormat: effectiveCfg.BranchNameFormat,
-				Handle:           t.Handle,
-			})
-			if err != nil {
-				return fmt.Errorf("task %s: %w", t.Handle, err)
+			if branch == "" {
+				fmt.Fprintf(os.Stderr, "Creating branch for %q (#%s from %s)...\n", t.Handle, t.IssueNum, base)
+				var err error
+				branch, err = github.DevelopBranch(github.DevelopArgs{
+					IssueNum:         t.IssueNum,
+					IssueRepo:        effectiveCfg.IssueRepo,
+					BranchRepo:       effectiveCfg.BranchRepo,
+					Base:             base,
+					BranchNameFormat: effectiveCfg.BranchNameFormat,
+					Handle:           t.Handle,
+				})
+				if err != nil {
+					return fmt.Errorf("task %s: %w", t.Handle, err)
+				}
+				fmt.Fprintf(os.Stderr, "  Branch: %s\n", branch)
 			}
-			fmt.Fprintf(os.Stderr, "  Branch: %s\n", branch)
 		}
 
 		worktreeDir := worktreePath(effectiveCfg.RemoteRepo, branch, effectiveCfg.WorktreePrefix)
