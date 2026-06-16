@@ -53,6 +53,10 @@ fi
 cd "$REPO_ROOT"
 git fetch origin
 
+# Drop stale worktree registrations so a worktree dir that was deleted without
+# `git worktree remove` doesn't block re-adding it here.
+git -C "$REPO_ROOT" worktree prune
+
 echo "Checking out $BRANCH into $WORKTREE_DIR..."
 if [[ -d "$REPO_ROOT/.beads" ]]; then
   # Beads repo: use `bd worktree create` so the new worktree shares the main
@@ -69,10 +73,12 @@ if [[ -d "$REPO_ROOT/.beads" ]]; then
   # script gets over non-tty SSH — run it via `bash -lc` so it resolves.
   ( cd "$REPO_ROOT" && WT="$WORKTREE_DIR" BR="$BRANCH" \
       bash -lc 'bd worktree create "$WT" --branch="$BR"' )
+elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+  # Local branch already exists (e.g. a prior run created it) — attach it
+  # rather than trying to recreate it, which would fail.
+  git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH"
 elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
   git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" "origin/$BRANCH"
-elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
-  git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH"
 else
   git -C "$REPO_ROOT" worktree add -b "$BRANCH" "$WORKTREE_DIR"
 fi
