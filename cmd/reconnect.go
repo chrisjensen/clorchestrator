@@ -104,8 +104,21 @@ func reconnectRun(args []string, force bool) error {
 				prefix   string
 				tabColor string
 			}
+			cfgColor := config.ResolveTabColor(e.cfg.ITermTabColor, e.path)
 			matchers := []matcher{
-				{prefix: configID + "_", tabColor: config.ResolveTabColor(e.cfg.ITermTabColor, e.path)},
+				{prefix: configID + "_", tabColor: cfgColor},
+			}
+			// Also match sessions created by --restart, which are named after
+			// the worktree dir basename (<worktreePrefix>-<branch>).
+			if e.cfg.RemoteRepo != "" {
+				repo := strings.TrimRight(e.cfg.RemoteRepo, "/")
+				if lastSlash := strings.LastIndex(repo, "/"); lastSlash >= 0 {
+					wtPrefix := e.cfg.WorktreePrefix
+					if wtPrefix == "" {
+						wtPrefix = repo[lastSlash+1:]
+					}
+					matchers = append(matchers, matcher{prefix: wtPrefix + "-", tabColor: cfgColor})
+				}
 			}
 			for _, pkg := range e.cfg.Packages {
 				if pkg.Name == "" {
@@ -115,10 +128,22 @@ func reconnectRun(args []string, force bool) error {
 				if pkgColor == "" {
 					pkgColor = e.cfg.ITermTabColor
 				}
+				resolvedPkgColor := config.ResolveTabColor(pkgColor, e.path)
 				matchers = append(matchers, matcher{
 					prefix:   pkg.Name + "_",
-					tabColor: config.ResolveTabColor(pkgColor, e.path),
+					tabColor: resolvedPkgColor,
 				})
+				// --restart sessions for packages with their own repo
+				if pkg.RemoteRepo != "" {
+					repo := strings.TrimRight(pkg.RemoteRepo, "/")
+					if lastSlash := strings.LastIndex(repo, "/"); lastSlash >= 0 {
+						wtPrefix := pkg.WorktreePrefix
+						if wtPrefix == "" {
+							wtPrefix = repo[lastSlash+1:]
+						}
+						matchers = append(matchers, matcher{prefix: wtPrefix + "-", tabColor: resolvedPkgColor})
+					}
+				}
 			}
 
 			screenAction := "screen -r"
@@ -307,14 +332,10 @@ func reconnectRestart(args []string) error {
 	}
 
 	for server, targets := range byServer {
-		sessions, err := listScreenSessions(server)
+		sessionDirs, err := listSessionDirs(server)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not list sessions on %s: %v\n", server, err)
+			fmt.Fprintf(os.Stderr, "warning: could not inspect session dirs on %s: %v\n", server, err)
 			continue
-		}
-		sessionNames := make(map[string]bool, len(sessions))
-		for _, s := range sessions {
-			sessionNames[s.name] = true
 		}
 
 		for _, t := range targets {
@@ -339,21 +360,26 @@ func reconnectRestart(args []string) error {
 			}
 
 			for _, dir := range dirs {
-				base := dir[strings.LastIndex(dir, "/")+1:]
-				if sessionNames[base] {
-					fmt.Fprintf(os.Stderr, "skipping %s — session %q already exists\n", dir, base)
+				if sessionDirs[dir] {
+					fmt.Fprintf(os.Stderr, "skipping %s — already open in a screen session\n", dir)
 					continue
 				}
+				base := dir[strings.LastIndex(dir, "/")+1:]
+				// Start screen with a login shell cd'd into the worktree, then
+				// type claude --continue as a followup (same pattern as open's
+				// noClaude path + buildFollowupCmd, so the login profile is
+				// sourced before claude runs).
 				var remoteCmd string
 				if server == "" {
-					remoteCmd = fmt.Sprintf("screen -S %s bash -c 'cd %s && claude --continue'", base, dir)
+					remoteCmd = fmt.Sprintf("screen -S %s bash -c 'cd %s && exec bash -l'", base, dir)
 				} else {
-					remoteCmd = fmt.Sprintf(`ssh -t %s "screen -S %s bash -c 'cd %s && claude --continue'"`, server, base, dir)
+					remoteCmd = fmt.Sprintf(`ssh -t %s "screen -S %s bash -c 'cd %s && exec bash -l'"`, server, base, dir)
 				}
 				fmt.Fprintf(os.Stderr, "starting session %q for %s\n", base, dir)
 				if err := iterm.OpenTab(iterm.TabOptions{
 					TabColorHex: t.tabColor,
 					RemoteCmd:   remoteCmd,
+					FollowupCmd: "claude --continue",
 				}); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: could not open tab for %s: %v\n", dir, err)
 				}
@@ -362,6 +388,34 @@ func reconnectRestart(args []string) error {
 	}
 
 	return nil
+}
+
+// listSessionDirs returns the set of working directories currently held by
+// child processes of all screen sessions. This detects sessions regardless of
+// their name, covering both sessions created by `open` (configID_handle) and
+// sessions created by --restart (dir basename).
+//
+// On Linux the cwd is read from /proc/<pid>/cwd; on macOS via lsof. The shell
+// command tries /proc first and falls back to lsof so it works on both.
+func listSessionDirs(server string) (map[string]bool, error) {
+	shellCmd := `screen -ls 2>/dev/null | grep -oE '[0-9]+\.' | tr -d '.' | while read pid; do` +
+		` pgrep -P "$pid" 2>/dev/null | while read child; do` +
+		` readlink /proc/$child/cwd 2>/dev/null ||` +
+		` lsof -a -d cwd -p $child -Fn 2>/dev/null | grep '^n' | sed 's/^n//';` +
+		` done; done 2>/dev/null`
+	var out []byte
+	if server == "" {
+		out, _ = exec.Command("sh", "-c", shellCmd).Output()
+	} else {
+		out, _ = exec.Command("ssh", server, shellCmd).Output()
+	}
+	dirs := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			dirs[line] = true
+		}
+	}
+	return dirs, nil
 }
 
 // listWorktreeDirs returns directories under parent whose names start with
