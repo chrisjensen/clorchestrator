@@ -126,22 +126,25 @@ func TestBuildRemoteCmd_NoClaude(t *testing.T) {
 
 func TestBuildFollowupCmd(t *testing.T) {
 	wd := "~/src/extractor-branch-x"
-	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false); !strings.Contains(got, "cd ~/src/extractor-branch-x && claude --model opus --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false, true); !strings.Contains(got, "cd ~/src/extractor-branch-x && claude --model opus --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
 		t.Errorf("ModeFullTask fresh: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false); got != "cd ~/src/extractor-branch-x && claude --model opus" {
-		t.Errorf("ModeWorktree fresh: got %q", got)
+	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false, false); got != "cd ~/src/extractor-branch-x && claude --model opus" {
+		t.Errorf("ModeWorktree no prompt: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeFullTask, "h", wd, "123.x", false); got != "" {
+	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false, true); !strings.Contains(got, "cd ~/src/extractor-branch-x && claude --model opus --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
+		t.Errorf("ModeWorktree with prompt: got %q", got)
+	}
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "123.x", false, true); got != "" {
 		t.Errorf("reattach should suppress followup: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeHandleSession, "h", wd, "", false); got != "" {
+	if got := buildFollowupCmd(ModeHandleSession, "h", wd, "", false, false); got != "" {
 		t.Errorf("ModeHandleSession should have no followup: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", true); got != "" {
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", true, true); got != "" {
 		t.Errorf("noClaude ModeFullTask should suppress followup: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", true); got != "" {
+	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", true, false); got != "" {
 		t.Errorf("noClaude ModeWorktree should suppress followup: got %q", got)
 	}
 }

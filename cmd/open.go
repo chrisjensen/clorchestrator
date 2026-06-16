@@ -134,6 +134,7 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		}
 	}
 
+	wrotePrompt := false
 	if (mode == ModeFullTask || mode == ModeWorktree) && existingSessID == "" {
 		location := cfg.Server
 		if location == "" {
@@ -156,10 +157,18 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		if err := writeTaskConf(cfg.Server, handle, tc); err != nil {
 			return err
 		}
-		if mode == ModeFullTask && !opts.noClaude {
-			prompt := buildPrompt(issueNum, cfg.IssueRepo, cfg.PlanningContext, opts.extraContext)
-			if err := writePromptFile(cfg.Server, handle, prompt); err != nil {
-				return err
+		if !opts.noClaude {
+			var prompt string
+			if mode == ModeFullTask {
+				prompt = buildPrompt(issueNum, cfg.IssueRepo, cfg.PlanningContext, opts.extraContext)
+			} else if mode == ModeWorktree && opts.extraContext != "" {
+				prompt = buildTaskPrompt(cfg.PlanningContext, opts.extraContext)
+			}
+			if prompt != "" {
+				if err := writePromptFile(cfg.Server, handle, prompt); err != nil {
+					return err
+				}
+				wrotePrompt = true
 			}
 		}
 		if err := runSetup(cfg.Server, handle); err != nil {
@@ -170,7 +179,7 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 
 	worktreeDir := worktreePath(cfg.RemoteRepo, branch, cfg.WorktreePrefix)
 	remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID, worktreeDir, opts.noClaude)
-	followup := buildFollowupCmd(mode, handle, worktreeDir, existingSessID, opts.noClaude)
+	followup := buildFollowupCmd(mode, handle, worktreeDir, existingSessID, opts.noClaude, wrotePrompt)
 
 	tabColor := config.ResolveTabColor(cfg.ITermTabColor, configPath)
 	if opts.openTab {
@@ -294,6 +303,22 @@ func runSetup(server, handle string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// buildTaskPrompt returns a prompt for a task with no GitHub issue.
+func buildTaskPrompt(planningContext, description string) string {
+	return fmt.Sprintf(`You are working on the following task.
+
+## Repo context
+%s
+
+## Task description
+%s
+
+## Planning instructions
+- Ensure the plan is consistent with the existing architecture and patterns of the codebase
+- After generating the plan, check what was missed from the plan
+`, planningContext, description)
 }
 
 // buildPrompt returns the markdown prompt body (no surrounding quotes) that
@@ -428,14 +453,15 @@ func buildRemoteCmd(cfg *config.Config, mode Mode, handle, sessionName, existing
 // claude (and any subsequent commands after claude exits) run from there.
 // Returns "" when no followup should be typed (reattach, non-task modes, or
 // noClaude — screen has already cd'd into the worktree in that case).
-func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string, noClaude bool) string {
+func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string, noClaude, withPrompt bool) string {
 	if existingSessID != "" || noClaude {
 		return ""
 	}
 	switch mode {
-	case ModeFullTask:
-		return fmt.Sprintf(`cd %s && claude --model opus --permission-mode plan "$(cat /tmp/task-%s.prompt.md)"`, worktreeDir, handle)
-	case ModeWorktree:
+	case ModeFullTask, ModeWorktree:
+		if withPrompt {
+			return fmt.Sprintf(`cd %s && claude --model opus --permission-mode plan "$(cat /tmp/task-%s.prompt.md)"`, worktreeDir, handle)
+		}
 		return fmt.Sprintf(`cd %s && claude --model opus`, worktreeDir)
 	}
 	return ""
