@@ -113,17 +113,33 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		sessionName = opts.pkg + "_" + handle
 	}
 
+	// worktreeDir is needed both for session detection (--restart sessions are
+	// named after the worktree basename) and later for buildRemoteCmd.
+	worktreeDir := worktreePath(cfg.RemoteRepo, branch, cfg.WorktreePrefix)
+	worktreeBase := filepath.Base(worktreeDir)
+
+	// findSession checks sessionName first, then falls back to worktreeBase so
+	// that sessions created by `reconnect --restart` (named after the worktree
+	// directory) are detected even when the open-style name doesn't match.
+	findSession := func() (id, state string) {
+		id, state = findExistingSession(cfg.Server, sessionName)
+		if id == "" && worktreeBase != sessionName {
+			id, state = findExistingSession(cfg.Server, worktreeBase)
+		}
+		return
+	}
+
 	var existingSessID string
 	if mode == ModeFullTask || mode == ModeWorktree {
 		if opts.fresh {
-			if id, _ := findExistingSession(cfg.Server, sessionName); id != "" {
+			if id, _ := findSession(); id != "" {
 				fmt.Fprintf(os.Stderr, "--fresh: killing existing screen session %s (%s)\n", sessionName, id)
 				if err := killSession(cfg.Server, id); err != nil {
 					fmt.Fprintf(os.Stderr, "  warning: kill failed: %v\n", err)
 				}
 			}
 		}
-		id, state := findExistingSession(cfg.Server, sessionName)
+		id, state := findSession()
 		if id != "" && state != "Detached" {
 			fmt.Fprintf(os.Stderr, "screen session %s exists but is %s — skipping (use --fresh to take over)\n", sessionName, state)
 			return nil
@@ -177,7 +193,6 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		fmt.Fprintln(os.Stderr, "Setup complete — launching session.")
 	}
 
-	worktreeDir := worktreePath(cfg.RemoteRepo, branch, cfg.WorktreePrefix)
 	remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID, worktreeDir, opts.noClaude)
 	followup := buildFollowupCmd(mode, handle, worktreeDir, existingSessID, opts.noClaude, wrotePrompt)
 
