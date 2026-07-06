@@ -379,7 +379,7 @@ func reconnectRestart(args []string) error {
 				if err := iterm.OpenTab(iterm.TabOptions{
 					TabColorHex: t.tabColor,
 					RemoteCmd:   remoteCmd,
-					FollowupCmd: "claude --continue",
+					FollowupCmd: "headclaude --continue",
 				}); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: could not open tab for %s: %v\n", dir, err)
 				}

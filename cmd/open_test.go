@@ -126,13 +126,13 @@ func TestBuildRemoteCmd_NoClaude(t *testing.T) {
 
 func TestBuildFollowupCmd(t *testing.T) {
 	wd := "~/src/extractor-branch-x"
-	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false, true); !strings.Contains(got, "cd ~/src/extractor-branch-x && claude --model opus --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false, true); !strings.Contains(got, "cd ~/src/extractor-branch-x && headclaude --model opus --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
 		t.Errorf("ModeFullTask fresh: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false, false); got != "cd ~/src/extractor-branch-x && claude --model opus" {
+	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false, false); got != "cd ~/src/extractor-branch-x && headclaude --model opus" {
 		t.Errorf("ModeWorktree no prompt: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false, true); !strings.Contains(got, "cd ~/src/extractor-branch-x && claude --model opus --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
+	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false, true); !strings.Contains(got, "cd ~/src/extractor-branch-x && headclaude --model opus --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
 		t.Errorf("ModeWorktree with prompt: got %q", got)
 	}
 	if got := buildFollowupCmd(ModeFullTask, "h", wd, "123.x", false, true); got != "" {
