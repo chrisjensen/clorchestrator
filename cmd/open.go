@@ -112,6 +112,9 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 	if opts.pkg != "" {
 		sessionName = opts.pkg + "_" + handle
 	}
+	if issueNum != "" {
+		sessionName = sessionName + "_" + issueNum
+	}
 
 	// worktreeDir is needed both for session detection (--restart sessions are
 	// named after the worktree basename) and later for buildRemoteCmd.
