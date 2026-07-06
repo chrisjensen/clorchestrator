@@ -155,8 +155,15 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
 			}
 
 			if branch == "" {
+				closed, err := github.IsIssueClosed(t.IssueNum, effectiveCfg.IssueRepo)
+				if err != nil {
+					return fmt.Errorf("task %s: check issue state: %w", t.Handle, err)
+				}
+				if closed {
+					fmt.Fprintf(os.Stderr, "Skipping %q (#%s): issue is already closed\n", t.Handle, t.IssueNum)
+					continue
+				}
 				fmt.Fprintf(os.Stderr, "Creating branch for %q (#%s from %s)...\n", t.Handle, t.IssueNum, base)
-				var err error
 				branch, err = github.DevelopBranch(github.DevelopArgs{
 					IssueNum:         t.IssueNum,
 					IssueRepo:        effectiveCfg.IssueRepo,

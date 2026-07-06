@@ -50,6 +50,35 @@ func TestFormatBranchName(t *testing.T) {
 	}
 }
 
+func TestIsIssueClosed(t *testing.T) {
+	origRun := runFunc
+	t.Cleanup(func() { runFunc = origRun })
+
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"open issue", "OPEN\n", false},
+		{"closed issue", "CLOSED\n", true},
+		{"merged PR", "MERGED\n", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			runFunc = func(name string, args ...string) ([]byte, error) {
+				return []byte(c.output), nil
+			}
+			got, err := IsIssueClosed("42", "org/repo")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 func TestDevelopBranch_PassesArgs(t *testing.T) {
 	var gotName string
 	var gotArgs []string

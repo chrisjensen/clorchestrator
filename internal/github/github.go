@@ -69,6 +69,16 @@ func ListLinkedBranches(issueNum, issueRepo string) ([]string, error) {
 	return branches, nil
 }
 
+// IsIssueClosed returns true when the issue's state is not OPEN.
+func IsIssueClosed(issueNum, issueRepo string) (bool, error) {
+	out, err := runFunc("gh", "issue", "view", issueNum, "--repo", issueRepo, "--json", "state", "--jq", ".state")
+	if err != nil {
+		return false, fmt.Errorf("gh issue view: %w: %s", err, string(out))
+	}
+	state := strings.TrimSpace(string(out))
+	return state != "OPEN", nil
+}
+
 // ParseBranchFromOutput extracts the branch name from `gh issue develop` output,
 // which typically prints a URL ending in the branch: .../tree/<branch-name>
 func ParseBranchFromOutput(out string) (string, bool) {
