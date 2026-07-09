@@ -19,9 +19,10 @@ WORKTREE_PREFIX="${WORKTREE_PREFIX:-$(basename "$REPO_ROOT")}"
 WORKTREE_DIR="$(dirname "$REPO_ROOT")/${WORKTREE_PREFIX}-${SANITIZED}"
 RESOURCES="$REPO_ROOT/resources"
 POST_SETUP_CMD="${POST_SETUP_CMD:-}"
+RUN_TOKENSAVE_SYNC=false
 
 start_background_setup() {
-  if [[ ! -d "$REPO_ROOT/node_modules" ]] && [[ -z "$POST_SETUP_CMD" ]]; then
+  if [[ ! -d "$REPO_ROOT/node_modules" ]] && [[ -z "$POST_SETUP_CMD" ]] && [[ "$RUN_TOKENSAVE_SYNC" != true ]]; then
     return
   fi
   echo "Background setup starting: tail -f $WORKTREE_DIR/.setup.log"
@@ -35,6 +36,10 @@ start_background_setup() {
       echo "Running post-setup: $POST_SETUP_CMD"
       bash -lc "$POST_SETUP_CMD"
     fi
+    if [[ "$RUN_TOKENSAVE_SYNC" == true ]]; then
+      echo "Running tokensave sync..."
+      bash -lc "tokensave sync \"$WORKTREE_DIR\""
+    fi
     echo "=== Background setup complete ==="
   ) > "$WORKTREE_DIR/.setup.log" 2>&1 &
   disown
@@ -45,6 +50,11 @@ if [[ -d "$WORKTREE_DIR" ]]; then
   echo "=== Resuming existing worktree ==="
   echo "  Path:   $WORKTREE_DIR"
   echo "  Branch: $BRANCH"
+  if [[ -d "$WORKTREE_DIR/.tokensave" ]]; then
+    echo "  tokensave: present"
+  else
+    echo "  tokensave: not found"
+  fi
   start_background_setup
   exit 0
 fi
@@ -58,11 +68,19 @@ git fetch origin
 git -C "$REPO_ROOT" worktree prune
 
 echo "Checking out $BRANCH into $WORKTREE_DIR..."
-if [[ -d "$REPO_ROOT/.beads" ]]; then
-  # Beads repo: use `bd worktree create` so the new worktree shares the main
-  # repo's .beads database via a redirect. bd attaches an existing local
-  # branch but does not create one tracking origin, so set that up first to
-  # preserve the resume-a-remote-branch behaviour of the plain-git path below.
+# Use bd worktree create only for stealth beads (untracked .beads dir).
+# If .beads is committed on the branch, plain git worktree add preserves it;
+# bd worktree create would overwrite it with a redirect to the main repo's DB.
+BEADS_COMMITTED=false
+if [[ -d "$REPO_ROOT/.beads" ]] && git -C "$REPO_ROOT" ls-files --error-unmatch .beads/ > /dev/null 2>&1; then
+  BEADS_COMMITTED=true
+fi
+
+if [[ -d "$REPO_ROOT/.beads" ]] && [[ "$BEADS_COMMITTED" == false ]]; then
+  # Stealth beads repo: use `bd worktree create` so the new worktree shares
+  # the main repo's .beads database via a redirect. bd attaches an existing
+  # local branch but does not create one tracking origin, so set that up first
+  # to preserve the resume-a-remote-branch behaviour of the plain-git path below.
   if ! git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
     if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
       git -C "$REPO_ROOT" branch --track "$BRANCH" "origin/$BRANCH"
@@ -83,9 +101,34 @@ else
   git -C "$REPO_ROOT" worktree add -b "$BRANCH" "$WORKTREE_DIR"
 fi
 
+TOKENSAVE_SRC="$(git -C "$REPO_ROOT" worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
+if [[ -d "$TOKENSAVE_SRC/.tokensave" ]]; then
+  cp -a "$TOKENSAVE_SRC/.tokensave" "$WORKTREE_DIR/.tokensave"
+  tmp="$WORKTREE_DIR/.tokensave/config.json"
+  if [[ -f "$tmp" ]]; then
+    if command -v jq &>/dev/null; then
+      jq --arg r "$WORKTREE_DIR" '.root_dir=$r' "$tmp" > "$tmp.new" && mv "$tmp.new" "$tmp"
+    else
+      sed -i "s|\"root_dir\":\"[^\"]*\"|\"root_dir\":\"$WORKTREE_DIR\"|" "$tmp"
+    fi
+  fi
+  echo "Seeded .tokensave from $TOKENSAVE_SRC"
+  RUN_TOKENSAVE_SYNC=true
+fi
+
 if [[ -d "$REPO_ROOT/.claude" ]]; then
-  cp -r "$REPO_ROOT/.claude" "$WORKTREE_DIR/.claude"
-  echo "Copied .claude/ (skills, settings)"
+  find "$REPO_ROOT/.claude" -mindepth 1 -type d | while read -r dir; do
+    mkdir -p "$WORKTREE_DIR/${dir#"$REPO_ROOT"/}"
+  done
+  find "$REPO_ROOT/.claude" -type f -size +0c | while read -r f; do
+    cp "$f" "$WORKTREE_DIR/${f#"$REPO_ROOT"/}"
+  done
+  if [[ -z "$(find "$WORKTREE_DIR/.claude" -type f 2>/dev/null)" ]]; then
+    rm -rf "$WORKTREE_DIR/.claude"
+    echo "Skipped .claude/ (no non-empty files)"
+  else
+    echo "Copied .claude/ (skills, settings)"
+  fi
 fi
 
 for doc_file in CLAUDE.md AGENTS.md; do
