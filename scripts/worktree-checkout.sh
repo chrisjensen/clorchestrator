@@ -19,10 +19,8 @@ WORKTREE_PREFIX="${WORKTREE_PREFIX:-$(basename "$REPO_ROOT")}"
 WORKTREE_DIR="$(dirname "$REPO_ROOT")/${WORKTREE_PREFIX}-${SANITIZED}"
 RESOURCES="$REPO_ROOT/resources"
 POST_SETUP_CMD="${POST_SETUP_CMD:-}"
-RUN_TOKENSAVE_SYNC=false
-
 start_background_setup() {
-  if [[ ! -d "$REPO_ROOT/node_modules" ]] && [[ -z "$POST_SETUP_CMD" ]] && [[ "$RUN_TOKENSAVE_SYNC" != true ]]; then
+  if [[ ! -d "$REPO_ROOT/node_modules" ]] && [[ -z "$POST_SETUP_CMD" ]]; then
     return
   fi
   echo "Background setup starting: tail -f $WORKTREE_DIR/.setup.log"
@@ -35,10 +33,6 @@ start_background_setup() {
     if [[ -n "$POST_SETUP_CMD" ]]; then
       echo "Running post-setup: $POST_SETUP_CMD"
       bash -lc "$POST_SETUP_CMD"
-    fi
-    if [[ "$RUN_TOKENSAVE_SYNC" == true ]]; then
-      echo "Running tokensave sync..."
-      bash -lc "tokensave sync \"$WORKTREE_DIR\""
     fi
     echo "=== Background setup complete ==="
   ) > "$WORKTREE_DIR/.setup.log" 2>&1 &
@@ -103,6 +97,35 @@ fi
 
 TOKENSAVE_SRC="$(git -C "$REPO_ROOT" worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
 if [[ -d "$TOKENSAVE_SRC/.tokensave" ]]; then
+  echo "Updating tokensave on main worktree before seeding..."
+
+  DEFAULT_BRANCH=$(git -C "$TOKENSAVE_SRC" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|.*/||')
+  [[ -z "$DEFAULT_BRANCH" ]] && DEFAULT_BRANCH=main
+
+  git -C "$TOKENSAVE_SRC" fetch origin "$DEFAULT_BRANCH" --quiet
+
+  CURRENT_BRANCH=$(git -C "$TOKENSAVE_SRC" symbolic-ref --short HEAD 2>/dev/null)
+  NEEDS_CHECKOUT=false
+  [[ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]] && NEEDS_CHECKOUT=true
+
+  NEEDS_PULL=false
+  [[ "$(git -C "$TOKENSAVE_SRC" rev-parse HEAD)" != "$(git -C "$TOKENSAVE_SRC" rev-parse "origin/$DEFAULT_BRANCH")" ]] && NEEDS_PULL=true
+
+  STASHED=false
+  if $NEEDS_CHECKOUT || $NEEDS_PULL; then
+    if ! git -C "$TOKENSAVE_SRC" diff --quiet || ! git -C "$TOKENSAVE_SRC" diff --cached --quiet; then
+      git -C "$TOKENSAVE_SRC" stash push -m "clorchestrate-tokensave-update"
+      STASHED=true
+    fi
+    $NEEDS_CHECKOUT && git -C "$TOKENSAVE_SRC" checkout "$DEFAULT_BRANCH"
+    $NEEDS_PULL     && git -C "$TOKENSAVE_SRC" pull origin "$DEFAULT_BRANCH" --ff-only
+  fi
+
+  bash -lc "tokensave sync \"$TOKENSAVE_SRC\""
+
+  $NEEDS_CHECKOUT && git -C "$TOKENSAVE_SRC" checkout "$CURRENT_BRANCH"
+  $STASHED        && git -C "$TOKENSAVE_SRC" stash pop
+
   cp -a "$TOKENSAVE_SRC/.tokensave" "$WORKTREE_DIR/.tokensave"
   tmp="$WORKTREE_DIR/.tokensave/config.json"
   if [[ -f "$tmp" ]]; then
@@ -112,11 +135,11 @@ if [[ -d "$TOKENSAVE_SRC/.tokensave" ]]; then
       sed -i "s|\"root_dir\":\"[^\"]*\"|\"root_dir\":\"$WORKTREE_DIR\"|" "$tmp"
     fi
   fi
-  echo "Seeded .tokensave from $TOKENSAVE_SRC"
-  RUN_TOKENSAVE_SYNC=true
+  echo "Seeded .tokensave from $TOKENSAVE_SRC (pre-synced)"
 fi
 
 if [[ -d "$REPO_ROOT/.claude" ]]; then
+  mkdir -p "$WORKTREE_DIR/.claude"
   find "$REPO_ROOT/.claude" -mindepth 1 -type d | while read -r dir; do
     mkdir -p "$WORKTREE_DIR/${dir#"$REPO_ROOT"/}"
   done
