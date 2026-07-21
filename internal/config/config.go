@@ -39,6 +39,15 @@ func ResolveTabColor(rawValue, configPath string) string {
 	return defaultTabColors[h.Sum32()%uint32(len(defaultTabColors))]
 }
 
+// Command describes a named command for launching a Claude session.
+// The entry with Default=true (or the first entry if none is marked) is used
+// for all normal sessions. All entries are available for --benchmark runs.
+type Command struct {
+	Label   string `toml:"label"`
+	Cmd     string `toml:"cmd"`
+	Default bool   `toml:"default"`
+}
+
 // Package describes a library or package within a project that may have its own repo,
 // setup command, and optionally a persistent process (start_cmd).
 type Package struct {
@@ -68,6 +77,33 @@ type Config struct {
 	DispatchMode     string    `toml:"dispatch_mode"`
 	ID               string    `toml:"id"`
 	Packages         []Package `toml:"package"`
+	Commands         []Command `toml:"command"`
+}
+
+// DefaultClaudeCmd returns the command used to launch Claude in normal
+// (non-benchmark) sessions. Returns the first command with Default=true, then
+// the first command in the list, then the built-in fallback.
+func (c *Config) DefaultClaudeCmd() string {
+	for _, cmd := range c.Commands {
+		if cmd.Default {
+			return cmd.Cmd
+		}
+	}
+	if len(c.Commands) > 0 {
+		return c.Commands[0].Cmd
+	}
+	return "headclaude --model opus"
+}
+
+// CommandByLabel returns the Cmd for the named command, or an error if no
+// command with that label exists in the config.
+func (c *Config) CommandByLabel(label string) (string, error) {
+	for _, cmd := range c.Commands {
+		if cmd.Label == label {
+			return cmd.Cmd, nil
+		}
+	}
+	return "", fmt.Errorf("no command with label %q defined in config", label)
 }
 
 // ResolvePackage returns a copy of the config with the named package's fields
