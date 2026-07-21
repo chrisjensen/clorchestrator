@@ -16,6 +16,7 @@ import (
 
 func NewFlockCmd() *cobra.Command {
 	var forceBranch, fresh bool
+	var benchmark string
 	cmd := &cobra.Command{
 		Use:   "flock <config> <tasks.md>",
 		Short: "launch all sessions from a task file",
@@ -49,11 +50,12 @@ Task file format:
 		Args:              cobra.ExactArgs(2),
 		ValidArgsFunction: completeConfigPaths,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return flockRun(args[0], args[1], forceBranch, fresh)
+			return flockRun(args[0], args[1], forceBranch, fresh, benchmark)
 		},
 	}
 	cmd.Flags().BoolVar(&forceBranch, "force-branch", false, "always create a new branch (fail if one already exists)")
 	cmd.Flags().BoolVar(&fresh, "fresh", false, "kill any existing matching screen session before launching")
+	cmd.Flags().StringVar(&benchmark, "benchmark", "", "comma-separated command labels; opens one session per label per task with branch/dir suffixed by label")
 
 	defaultHelp := cmd.HelpFunc()
 	cmd.SetHelpFunc(func(c *cobra.Command, args []string) {
@@ -100,7 +102,7 @@ func appendPackageHelp(c *cobra.Command, args []string) {
 	}
 }
 
-func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
+func flockRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark string) error {
 	configPath, err := resolveConfigPath(configPath)
 	if err != nil {
 		return err
@@ -124,6 +126,8 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
 		return err
 	}
 
+	benchmarkLabels := parseBenchmarkLabels(benchmark)
+
 	for _, t := range tasks {
 		effectiveCfg, err := cfg.ResolvePackage(t.Package)
 		if err != nil {
@@ -134,6 +138,85 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
 		if base == "" {
 			base = effectiveCfg.DefaultBase
 		}
+
+		if len(benchmarkLabels) > 0 {
+			// Benchmark mode: one gh-linked branch per label, each suffixed with the label.
+			if t.IssueNum != "" {
+				closed, err := github.IsIssueClosed(t.IssueNum, effectiveCfg.IssueRepo)
+				if err != nil {
+					return fmt.Errorf("task %s: check issue state: %w", t.Handle, err)
+				}
+				if closed {
+					fmt.Fprintf(os.Stderr, "Skipping %q (#%s): issue is already closed\n", t.Handle, t.IssueNum)
+					continue
+				}
+			}
+
+			// Compute the base branch name we'd use for the label suffix.
+			baseBranchName := benchmarkBaseBranch(effectiveCfg.BranchNameFormat, t.IssueNum, t.Handle)
+
+			for _, label := range benchmarkLabels {
+				labelBranch := baseBranchName + "-" + label
+
+				if t.IssueNum != "" {
+					// Check if this label's branch is already linked to the issue.
+					if !forceBranch {
+						existing, err := github.ListLinkedBranches(t.IssueNum, effectiveCfg.IssueRepo)
+						if err != nil {
+							return fmt.Errorf("task %s label %s: list branches: %w", t.Handle, label, err)
+						}
+						for _, b := range existing {
+							if b == labelBranch {
+								fmt.Fprintf(os.Stderr, "Reusing existing branch for %q/%s (#%s): %s\n", t.Handle, label, t.IssueNum, labelBranch)
+								goto openBenchmarkSession
+							}
+						}
+					}
+					fmt.Fprintf(os.Stderr, "Creating branch for %q/%s (#%s from %s)...\n", t.Handle, label, t.IssueNum, base)
+					labelBranch, err = github.DevelopBranch(github.DevelopArgs{
+						IssueNum:   t.IssueNum,
+						IssueRepo:  effectiveCfg.IssueRepo,
+						BranchRepo: effectiveCfg.BranchRepo,
+						Base:       base,
+						Handle:     t.Handle,
+						BranchName: labelBranch,
+					})
+					if err != nil {
+						return fmt.Errorf("task %s label %s: %w", t.Handle, label, err)
+					}
+					fmt.Fprintf(os.Stderr, "  Branch: %s\n", labelBranch)
+				} else {
+					fmt.Fprintf(os.Stderr, "No-issue task %q/%s — branch: %s\n", t.Handle, label, labelBranch)
+				}
+
+			openBenchmarkSession:
+				worktreeDir := worktreePath(effectiveCfg.RemoteRepo, labelBranch, effectiveCfg.WorktreePrefix)
+				ahead, err := branchAheadCount(effectiveCfg.Server, worktreeDir, base)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "  warning: could not check commits ahead for %s: %v — proceeding with planning session\n", labelBranch, err)
+					ahead = 0
+				}
+				if ahead > 0 {
+					fmt.Fprintf(os.Stderr, "  Branch is %d commit(s) ahead of %s — opening shell in worktree (no Claude)\n", ahead, base)
+				}
+
+				opts := openOptions{
+					issue:          t.IssueNum,
+					extraContext:   t.ExtraContext,
+					pkg:            t.Package,
+					openTab:        true,
+					fresh:          fresh,
+					noClaude:       ahead > 0,
+					benchmarkLabel: label,
+				}
+				if err := openRun(configPath, t.Handle, labelBranch, opts); err != nil {
+					return fmt.Errorf("open for %s/%s: %w", t.Handle, label, err)
+				}
+			}
+			continue
+		}
+
+		// Normal (non-benchmark) path.
 		var branch string
 		if t.IssueNum == "" {
 			// No issue — derive branch name from handle.
@@ -202,6 +285,32 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool) error {
 		}
 	}
 	return nil
+}
+
+// parseBenchmarkLabels splits a comma-separated label string into trimmed,
+// non-empty labels. Returns nil when the input is empty.
+func parseBenchmarkLabels(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var labels []string
+	for _, l := range strings.Split(s, ",") {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			labels = append(labels, l)
+		}
+	}
+	return labels
+}
+
+// benchmarkBaseBranch returns the base branch name used to derive per-label
+// benchmark branches. When a branch_name_format is set the formatted name is
+// used; otherwise the handle is used as a short, predictable base.
+func benchmarkBaseBranch(format, issue, handle string) string {
+	if format != "" {
+		return github.FormatBranchName(format, issue, handle)
+	}
+	return handle
 }
 
 // aheadShellCmd renders the shell snippet used by branchAheadCount. Paths are

@@ -13,6 +13,7 @@ type DevelopArgs struct {
 	Base             string
 	BranchNameFormat string // tokens {issue} {handle} replaced before calling gh
 	Handle           string
+	BranchName       string // explicit branch name; overrides BranchNameFormat when set
 }
 
 // runFunc is the subprocess runner. Replaced in tests.
@@ -29,7 +30,9 @@ func DevelopBranch(a DevelopArgs) (string, error) {
 		"--branch-repo", a.BranchRepo,
 		"--base", a.Base,
 	}
-	if a.BranchNameFormat != "" {
+	if a.BranchName != "" {
+		args = append(args, "--name", a.BranchName)
+	} else if a.BranchNameFormat != "" {
 		args = append(args, "--name", FormatBranchName(a.BranchNameFormat, a.IssueNum, a.Handle))
 	}
 	out, err := runFunc("gh", args...)

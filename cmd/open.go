@@ -27,16 +27,18 @@ const (
 )
 
 type openOptions struct {
-	issue        string
-	extraContext string
-	pkg          string
-	openTab      bool
-	fresh        bool
-	noClaude     bool // open the screen session in the worktree but don't launch claude
+	issue          string
+	extraContext   string
+	pkg            string
+	openTab        bool
+	fresh          bool
+	noClaude       bool   // open the screen session in the worktree but don't launch claude
+	benchmarkLabel string // non-empty when opening one variant of a benchmark run
 }
 
 func NewOpenCmd() *cobra.Command {
 	var opts openOptions
+	var benchmark string
 	cmd := &cobra.Command{
 		Use:   "open <config> [handle] [branch]",
 		Short: "launch a Claude session",
@@ -59,6 +61,25 @@ DISPATCH_ITERM_TAB_COLOR is set) is applied via escape sequences in both modes.`
 			if len(args) >= 3 {
 				branch = args[2]
 			}
+			if benchmark != "" {
+				labels := strings.Split(benchmark, ",")
+				for _, label := range labels {
+					label = strings.TrimSpace(label)
+					if label == "" {
+						continue
+					}
+					labelOpts := opts
+					labelOpts.benchmarkLabel = label
+					labelBranch := branch
+					if labelBranch != "" {
+						labelBranch = branch + "-" + label
+					}
+					if err := openRun(args[0], handle, labelBranch, labelOpts); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
 			return openRun(args[0], handle, branch, opts)
 		},
 	}
@@ -67,6 +88,7 @@ DISPATCH_ITERM_TAB_COLOR is set) is applied via escape sequences in both modes.`
 	cmd.Flags().StringVar(&opts.pkg, "package", "", "package name to resolve repo/setup overrides from config")
 	cmd.Flags().BoolVar(&opts.openTab, "tab", false, "open a new iTerm2 tab instead of running in current terminal")
 	cmd.Flags().BoolVar(&opts.fresh, "fresh", false, "kill any existing matching screen session before launching")
+	cmd.Flags().StringVar(&benchmark, "benchmark", "", "comma-separated command labels; opens one session per label with branch/dir suffixed by label")
 	return cmd
 }
 
@@ -114,6 +136,9 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 	}
 	if issueNum != "" {
 		sessionName = sessionName + "_" + issueNum
+	}
+	if opts.benchmarkLabel != "" {
+		sessionName = sessionName + "_" + opts.benchmarkLabel
 	}
 
 	// worktreeDir is needed both for session detection (--restart sessions are
@@ -196,8 +221,17 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		fmt.Fprintln(os.Stderr, "Setup complete — launching session.")
 	}
 
+	claudeCmd := cfg.DefaultClaudeCmd()
+	if opts.benchmarkLabel != "" {
+		labelCmd, err := cfg.CommandByLabel(opts.benchmarkLabel)
+		if err != nil {
+			return err
+		}
+		claudeCmd = labelCmd
+	}
+
 	remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID, worktreeDir, opts.noClaude)
-	followup := buildFollowupCmd(mode, handle, worktreeDir, existingSessID, opts.noClaude, wrotePrompt)
+	followup := buildFollowupCmd(mode, handle, worktreeDir, existingSessID, opts.noClaude, wrotePrompt, claudeCmd)
 
 	tabColor := config.ResolveTabColor(cfg.ITermTabColor, configPath)
 	if opts.openTab {
@@ -471,16 +505,16 @@ func buildRemoteCmd(cfg *config.Config, mode Mode, handle, sessionName, existing
 // claude (and any subsequent commands after claude exits) run from there.
 // Returns "" when no followup should be typed (reattach, non-task modes, or
 // noClaude — screen has already cd'd into the worktree in that case).
-func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string, noClaude, withPrompt bool) string {
+func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string, noClaude, withPrompt bool, claudeCmd string) string {
 	if existingSessID != "" || noClaude {
 		return ""
 	}
 	switch mode {
 	case ModeFullTask, ModeWorktree:
 		if withPrompt {
-			return fmt.Sprintf(`cd %s && headclaude --model opus --permission-mode plan "$(cat /tmp/task-%s.prompt.md)"`, worktreeDir, handle)
+			return fmt.Sprintf(`cd %s && %s --permission-mode plan "$(cat /tmp/task-%s.prompt.md)"`, worktreeDir, claudeCmd, handle)
 		}
-		return fmt.Sprintf(`cd %s && headclaude --model opus`, worktreeDir)
+		return fmt.Sprintf(`cd %s && %s`, worktreeDir, claudeCmd)
 	}
 	return ""
 }
