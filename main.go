@@ -14,7 +14,7 @@ func main() {
 		Short:        "orchestrate parallel Claude coding sessions",
 		SilenceUsage: true,
 	}
-	root.AddCommand(cmd.NewFlockCmd(), cmd.NewOpenCmd(), cmd.NewReconnectCmd())
+	root.AddCommand(cmd.NewFlockCmd(), cmd.NewOpenCmd(), cmd.NewReconnectCmd(), cmd.NewReviewCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
