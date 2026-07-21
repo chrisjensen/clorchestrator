@@ -24,3 +24,17 @@ iterm_tab_color = "#f4b6cf"
 # Describe the codebase, key patterns, and anything Claude should know upfront.
 # Use triple-quotes for multi-line values.
 planning_context = ""
+
+# Commands used to launch Claude in sessions.
+# The first entry with default=true (or the first entry if none is marked) is
+# used for all normal sessions. All entries are available for --benchmark runs.
+# If this section is omitted the built-in default "headclaude --model opus" is used.
+#
+# [[command]]
+# label = "claude"
+# cmd = "headclaude --model opus"
+# default = true
+#
+# [[command]]
+# label = "z.ai"
+# cmd = "zclaude"
