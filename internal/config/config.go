@@ -106,6 +106,22 @@ func (c *Config) CommandByLabel(label string) (string, error) {
 	return "", fmt.Errorf("no command with label %q defined in config", label)
 }
 
+// ResolveCommand finds a command by exact label match first, then by prefix
+// match on the cmd string. Returns an error if nothing matches.
+func (c *Config) ResolveCommand(s string) (Command, error) {
+	for _, cmd := range c.Commands {
+		if cmd.Label == s {
+			return cmd, nil
+		}
+	}
+	for _, cmd := range c.Commands {
+		if strings.HasPrefix(cmd.Cmd, s) {
+			return cmd, nil
+		}
+	}
+	return Command{}, fmt.Errorf("no command matching %q — use a label or the start of a cmd string", s)
+}
+
 // ResolvePackage returns a copy of the config with the named package's fields
 // overlaid. Fields set on the package override the global value; unset fields
 // fall back to the global value. Returns the config unchanged when name is
