@@ -15,7 +15,8 @@ import (
 )
 
 func NewReviewCmd() *cobra.Command {
-	return &cobra.Command{
+	var evaluate bool
+	cmd := &cobra.Command{
 		Use:   "review [config]",
 		Short: "review token usage across benchmark sessions",
 		Long: `Scan benchmark worktrees and report token usage per label as TSV.
@@ -26,7 +27,11 @@ With a config argument only that config's worktrees are checked.
 Benchmark worktrees are directories whose name ends with a command label
 defined in the config's [[command]] blocks. Token data is read from the
 Claude Code JSONL transcript files stored under ~/.claude/projects/ on the
-machine where the sessions ran.`,
+machine where the sessions ran.
+
+With --evaluate, a non-interactive Claude session is launched in the parent
+directory for each worktree to assess correctness and completeness across
+implementations. Evaluation columns are appended to the TSV output.`,
 		Args:              cobra.RangeArgs(0, 1),
 		ValidArgsFunction: completeConfigPaths,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -34,22 +39,43 @@ machine where the sessions ran.`,
 			if len(args) > 0 {
 				configArg = args[0]
 			}
-			return reviewRun(configArg)
+			return reviewRun(configArg, evaluate)
 		},
 	}
+	cmd.Flags().BoolVar(&evaluate, "evaluate", false, "launch evaluation agents per worktree and add quality columns to TSV")
+	return cmd
 }
 
 type tokenTotals struct {
-	label                    string
-	worktree                 string
-	sessions                 int
-	inputTokens              int
-	outputTokens             int
-	cacheReadTokens          int
-	cacheCreationTokens      int
+	label               string
+	worktree            string
+	sessions            int
+	inputTokens         int
+	outputTokens        int
+	cacheReadTokens     int
+	cacheCreationTokens int
+	// populated when --evaluate is set
+	dir       string
+	server    string
+	homeDir   string
+	parent    string
+	claudeCmd string
+	eval      evalJSON
+	complete  int
+	prose     string
 }
 
-func reviewRun(configArg string) error {
+type evalJSON struct {
+	Problem     string `json:"problem"`
+	Clarity     string `json:"clarity"`
+	Complexity  string `json:"complexity"`
+	Correct     *bool  `json:"correct"`
+	AllAspects  string `json:"all_aspects"`
+	Implemented string `json:"implemented"`
+	Missing     string `json:"missing"`
+}
+
+func reviewRun(configArg string, evaluate bool) error {
 	var configPaths []string
 	if configArg != "" {
 		p, err := resolveConfigPath(configArg)
@@ -99,9 +125,11 @@ func reviewRun(configArg string) error {
 			prefix = filepath.Base(repo)
 		}
 
-		for _, cmd := range cfg.Commands {
+		cfgRowStart := len(rows)
+
+		for _, command := range cfg.Commands {
 			// Glob for worktrees ending with the label suffix.
-			pattern := filepath.Join(parent, prefix+"-*-"+cmd.Label)
+			pattern := filepath.Join(parent, prefix+"-*-"+command.Label)
 			matches, err := remoteGlob(cfg.Server, pattern)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: glob %s: %v\n", pattern, err)
@@ -114,21 +142,267 @@ func reviewRun(configArg string) error {
 					fmt.Fprintf(os.Stderr, "warning: read tokens for %s: %v\n", worktreeDir, err)
 					continue
 				}
-				totals.label = cmd.Label
+				totals.label = command.Label
 				totals.worktree = filepath.Base(worktreeDir)
+				if evaluate {
+					totals.dir = worktreeDir
+					totals.server = cfg.Server
+					totals.homeDir = homeDir
+					totals.parent = parent
+					totals.claudeCmd = command.Cmd
+				}
 				rows = append(rows, totals)
 			}
+		}
+
+		if evaluate && len(rows) > cfgRowStart {
+			// cfgRows is a slice of the same backing array — mutations propagate to rows.
+			cfgRows := rows[cfgRowStart:]
+			runGroupedEvaluations(cfgRows)
 		}
 	}
 
 	// Print TSV header then rows.
-	fmt.Println("label\tworktree\tsessions\tinput_tokens\toutput_tokens\tcache_read_tokens\tcache_creation_tokens")
-	for _, r := range rows {
-		fmt.Printf("%s\t%s\t%d\t%d\t%d\t%d\t%d\n",
-			r.label, r.worktree, r.sessions,
-			r.inputTokens, r.outputTokens, r.cacheReadTokens, r.cacheCreationTokens)
+	if evaluate {
+		fmt.Println("label\tworktree\tsessions\tinput_tokens\toutput_tokens\tcache_read_tokens\tcache_creation_tokens\tproblem\tclarity\tcomplexity\tcorrect\tcomplete\tmissing")
+		for _, r := range rows {
+			correctStr := ""
+			if r.eval.Correct != nil {
+				correctStr = fmt.Sprintf("%v", *r.eval.Correct)
+			}
+			fmt.Printf("%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%d\t%s\n",
+				r.label, r.worktree, r.sessions,
+				r.inputTokens, r.outputTokens, r.cacheReadTokens, r.cacheCreationTokens,
+				r.eval.Problem, r.eval.Clarity, r.eval.Complexity,
+				correctStr, r.complete, r.eval.Missing)
+		}
+	} else {
+		fmt.Println("label\tworktree\tsessions\tinput_tokens\toutput_tokens\tcache_read_tokens\tcache_creation_tokens")
+		for _, r := range rows {
+			fmt.Printf("%s\t%s\t%d\t%d\t%d\t%d\t%d\n",
+				r.label, r.worktree, r.sessions,
+				r.inputTokens, r.outputTokens, r.cacheReadTokens, r.cacheCreationTokens)
+		}
 	}
 	return nil
+}
+
+// runGroupedEvaluations groups rows by task key (worktree base name with label suffix stripped),
+// then launches an evaluation agent for each directory in a group, informing it of the others.
+// Evaluation results are written back into the rows slice in place.
+func runGroupedEvaluations(rows []tokenTotals) {
+	groups := map[string][]int{}
+	for i, r := range rows {
+		taskKey := strings.TrimSuffix(r.worktree, "-"+r.label)
+		groups[taskKey] = append(groups[taskKey], i)
+	}
+
+	for _, indices := range groups {
+		groupRows := make([]tokenTotals, len(indices))
+		for j, i := range indices {
+			groupRows[j] = rows[i]
+		}
+
+		for j, i := range indices {
+			target := rows[i]
+			others := make([]tokenTotals, 0, len(groupRows)-1)
+			for k, r := range groupRows {
+				if k != j {
+					others = append(others, r)
+				}
+			}
+
+			prompt := buildEvalPrompt(target, others)
+			if err := writeEvalPrompt(target.server, target.worktree, prompt); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: write eval prompt for %s: %v\n", target.worktree, err)
+				continue
+			}
+
+			rawOutput, err := runEvaluation(target.server, target.parent, target.worktree, target.claudeCmd)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: evaluate %s: %v\n", target.worktree, err)
+				continue
+			}
+
+			jsonStr, prose, err := extractJSONAndProse(rawOutput)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: parse evaluation output for %s: %v\n", target.worktree, err)
+				continue
+			}
+
+			var ev evalJSON
+			if err := json.Unmarshal([]byte(jsonStr), &ev); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: unmarshal evaluation JSON for %s: %v\n", target.worktree, err)
+				continue
+			}
+
+			rows[i].eval = ev
+			rows[i].prose = prose
+		}
+
+		computeCompleteness(rows, indices)
+	}
+}
+
+func buildEvalPrompt(target tokenTotals, others []tokenTotals) string {
+	targetProjectsDir := claudeProjectsDir(target.homeDir, target.dir)
+
+	var sb strings.Builder
+	sb.WriteString("You are evaluating a software implementation. You are running in the parent\n")
+	sb.WriteString("directory; do NOT cd into any worktree — that would create a new Claude session\n")
+	sb.WriteString("history for that directory and contaminate its token counts.\n\n")
+
+	sb.WriteString("The implementation you are evaluating:\n")
+	fmt.Fprintf(&sb, "  Directory:         %s\n", target.dir)
+	fmt.Fprintf(&sb, "  Label:             %s\n", target.label)
+	fmt.Fprintf(&sb, "  Conversation dir:  %s\n", targetProjectsDir)
+	sb.WriteString("  (find session: ls -t <above>/*.jsonl | head -1)\n\n")
+
+	if len(others) > 0 {
+		sb.WriteString("Other implementations of the same task:\n")
+		for _, o := range others {
+			oProjectsDir := claudeProjectsDir(o.homeDir, o.dir)
+			fmt.Fprintf(&sb, "  - %s  (label: %s)\n", o.dir, o.label)
+			fmt.Fprintf(&sb, "    Conversation dir: %s\n", oProjectsDir)
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(`Steps (use git -C <dir> flags instead of cd to avoid changing your working directory):
+1. For THIS implementation and each other implementation:
+   a. Review changes: git -C <dir> log --oneline HEAD
+   b. Review the diff: git -C <dir> diff HEAD~<n>
+   c. Read the most recent conversation:
+      ls -t <conversationDir>/*.jsonl | head -1 | xargs head -c 200000
+2. Compare all implementations.
+
+Output ONLY the following JSON block, then a blank line, then a prose description:
+
+{
+  "problem": "debug" or "feature",
+  "clarity": "well-specified" or "ambiguous",
+  "complexity": "easy" or "moderate" or "hard",
+  "correct": true or false,
+  "all_aspects": "comma-separated list of ALL implementation aspects seen across ALL directories",
+  "implemented": "comma-separated aspects present in THIS directory",
+  "missing": "comma-separated aspects absent from THIS directory"
+}
+
+After the JSON, write a succinct prose description of notable differences in THIS
+implementation only. Leave assessment of the other directories to their own evaluators.
+`)
+	return sb.String()
+}
+
+func writeEvalPrompt(server, worktreeBase, prompt string) error {
+	path := fmt.Sprintf("/tmp/clorchestrate-eval-%s.md", worktreeBase)
+	if server == "" {
+		return os.WriteFile(path, []byte(prompt), 0644)
+	}
+	cmd := exec.Command("ssh", server, fmt.Sprintf("cat > %s", path))
+	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("write eval prompt on %s: %w", server, err)
+	}
+	return nil
+}
+
+func runEvaluation(server, parent, worktreeBase, claudeCmd string) (string, error) {
+	promptPath := fmt.Sprintf("/tmp/clorchestrate-eval-%s.md", worktreeBase)
+	shellCmd := fmt.Sprintf(`cd %s && %s --print "$(cat %s)"`, parent, claudeCmd, promptPath)
+
+	var cmd *exec.Cmd
+	if server == "" {
+		cmd = exec.Command("sh", "-c", shellCmd)
+	} else {
+		cmd = exec.Command("ssh", server, shellCmd)
+	}
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("run evaluation in %s: %w", parent, err)
+	}
+	return stdout.String(), nil
+}
+
+// extractJSONAndProse finds the JSON object in output (stripping markdown code fences and
+// surrounding prose) and returns it along with any trailing prose description.
+func extractJSONAndProse(output string) (string, string, error) {
+	s := strings.TrimSpace(output)
+
+	// Handle markdown code fences (```json...``` or ```...```)
+	if fenceIdx := strings.Index(s, "```"); fenceIdx != -1 {
+		inner := s[fenceIdx+3:]
+		// skip optional language tag line (e.g. "json\n")
+		if nl := strings.Index(inner, "\n"); nl != -1 {
+			inner = inner[nl+1:]
+		}
+		if closeIdx := strings.Index(inner, "```"); closeIdx != -1 {
+			candidate := strings.TrimSpace(inner[:closeIdx])
+			prose := strings.TrimSpace(inner[closeIdx+3:])
+			if start := strings.Index(candidate, "{"); start != -1 {
+				if end := strings.LastIndex(candidate, "}"); end > start {
+					jsonStr := candidate[start : end+1]
+					if json.Valid([]byte(jsonStr)) {
+						return jsonStr, prose, nil
+					}
+				}
+			}
+		}
+	}
+
+	// Fall back: find outermost { ... } in raw output
+	start := strings.Index(s, "{")
+	if start == -1 {
+		return "", "", fmt.Errorf("no JSON object found in evaluation output")
+	}
+	end := strings.LastIndex(s, "}")
+	if end <= start {
+		return "", "", fmt.Errorf("no closing } found in evaluation output")
+	}
+	jsonStr := s[start : end+1]
+	if !json.Valid([]byte(jsonStr)) {
+		return "", "", fmt.Errorf("invalid JSON in evaluation output")
+	}
+	prose := strings.TrimSpace(s[end+1:])
+	return jsonStr, prose, nil
+}
+
+// computeCompleteness merges all_aspects across a task group and sets each row's complete
+// field to the percentage of global aspects that row's implementation covers.
+func computeCompleteness(rows []tokenTotals, indices []int) {
+	globalAspects := map[string]bool{}
+	for _, i := range indices {
+		for _, a := range splitAspects(rows[i].eval.AllAspects) {
+			globalAspects[a] = true
+		}
+	}
+	total := len(globalAspects)
+	if total == 0 {
+		return
+	}
+	for _, i := range indices {
+		count := 0
+		for _, a := range splitAspects(rows[i].eval.Implemented) {
+			if globalAspects[a] {
+				count++
+			}
+		}
+		rows[i].complete = count * 100 / total
+	}
+}
+
+func splitAspects(s string) []string {
+	var result []string
+	for _, a := range strings.Split(s, ",") {
+		a = strings.TrimSpace(strings.ToLower(a))
+		if a != "" {
+			result = append(result, a)
+		}
+	}
+	return result
 }
 
 // remoteHomeDir returns the home directory on the given server (empty = local).
@@ -200,11 +474,13 @@ type usageLine struct {
 	} `json:"message"`
 }
 
-// readWorktreeTokens reads Claude Code JSONL transcripts for a worktree and
-// sums token usage. Sessions are counted as distinct JSONL files.
+// readWorktreeTokens reads the most recent Claude Code JSONL transcript for a
+// worktree and sums its token usage. Sessions counts all JSONL files present
+// so the caller can see how many attempts existed.
 func readWorktreeTokens(server, homeDir, worktreeDir string) (tokenTotals, error) {
 	projectDir := claudeProjectsDir(homeDir, worktreeDir)
-	shellCmd := fmt.Sprintf("ls %s/*.jsonl 2>/dev/null | xargs -r cat", projectDir)
+	// Sort by modification time (newest first) and read only the latest session.
+	shellCmd := fmt.Sprintf("ls -t %s/*.jsonl 2>/dev/null | head -1 | xargs -r cat", projectDir)
 
 	var out []byte
 	var err error
