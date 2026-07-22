@@ -127,6 +127,15 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 	}
 
 	benchmarkLabels := parseBenchmarkLabels(benchmark)
+	// Resolve and validate all benchmark labels against the config before
+	// doing any branch creation or session setup.
+	for i, raw := range benchmarkLabels {
+		resolved, err := cfg.ResolveCommand(raw)
+		if err != nil {
+			return err
+		}
+		benchmarkLabels[i] = resolved.Label
+	}
 
 	for _, t := range tasks {
 		effectiveCfg, err := cfg.ResolvePackage(t.Package)

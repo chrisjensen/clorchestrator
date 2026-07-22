@@ -62,19 +62,43 @@ DISPATCH_ITERM_TAB_COLOR is set) is applied via escape sequences in both modes.`
 				branch = args[2]
 			}
 			if benchmark != "" {
-				labels := strings.Split(benchmark, ",")
-				for _, label := range labels {
-					label = strings.TrimSpace(label)
-					if label == "" {
+				// Resolve and validate all labels before any setup work.
+				configPath, err := resolveConfigPath(args[0])
+				if err != nil {
+					return err
+				}
+				baseCfg, err := config.Parse(configPath)
+				if err != nil {
+					return err
+				}
+				resolvedCfg, err := baseCfg.ResolvePackage(opts.pkg)
+				if err != nil {
+					return err
+				}
+				type entry struct {
+					label  string
+					branch string
+				}
+				var entries []entry
+				for _, raw := range strings.Split(benchmark, ",") {
+					raw = strings.TrimSpace(raw)
+					if raw == "" {
 						continue
 					}
-					labelOpts := opts
-					labelOpts.benchmarkLabel = label
+					cmd, err := resolvedCfg.ResolveCommand(raw)
+					if err != nil {
+						return err
+					}
 					labelBranch := branch
 					if labelBranch != "" {
-						labelBranch = branch + "-" + label
+						labelBranch = branch + "-" + cmd.Label
 					}
-					if err := openRun(args[0], handle, labelBranch, labelOpts); err != nil {
+					entries = append(entries, entry{label: cmd.Label, branch: labelBranch})
+				}
+				for _, e := range entries {
+					labelOpts := opts
+					labelOpts.benchmarkLabel = e.label
+					if err := openRun(args[0], handle, e.branch, labelOpts); err != nil {
 						return err
 					}
 				}
