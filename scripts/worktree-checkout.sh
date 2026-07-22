@@ -100,31 +100,34 @@ if [[ -d "$TOKENSAVE_SRC/.tokensave" ]]; then
   echo "Updating tokensave on main worktree before seeding..."
 
   DEFAULT_BRANCH=$(git -C "$TOKENSAVE_SRC" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|.*/||')
-  [[ -z "$DEFAULT_BRANCH" ]] && DEFAULT_BRANCH=main
+  DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
 
-  git -C "$TOKENSAVE_SRC" fetch origin "$DEFAULT_BRANCH" --quiet
+  # Fetch all refs non-fatally; a missing/unreachable branch must not kill setup.
+  git -C "$TOKENSAVE_SRC" fetch origin --quiet 2>/dev/null || echo "  warning: git fetch failed, continuing with local state"
 
-  CURRENT_BRANCH=$(git -C "$TOKENSAVE_SRC" symbolic-ref --short HEAD 2>/dev/null)
+  CURRENT_BRANCH=$(git -C "$TOKENSAVE_SRC" symbolic-ref --short HEAD 2>/dev/null || true)
   NEEDS_CHECKOUT=false
-  [[ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]] && NEEDS_CHECKOUT=true
+  if [[ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]]; then NEEDS_CHECKOUT=true; fi
 
   NEEDS_PULL=false
-  [[ "$(git -C "$TOKENSAVE_SRC" rev-parse HEAD)" != "$(git -C "$TOKENSAVE_SRC" rev-parse "origin/$DEFAULT_BRANCH")" ]] && NEEDS_PULL=true
+  if [[ "$(git -C "$TOKENSAVE_SRC" rev-parse HEAD 2>/dev/null || true)" != "$(git -C "$TOKENSAVE_SRC" rev-parse "origin/$DEFAULT_BRANCH" 2>/dev/null || true)" ]]; then
+    NEEDS_PULL=true
+  fi
 
   STASHED=false
-  if $NEEDS_CHECKOUT || $NEEDS_PULL; then
+  if [[ "$NEEDS_CHECKOUT" == true ]] || [[ "$NEEDS_PULL" == true ]]; then
     if ! git -C "$TOKENSAVE_SRC" diff --quiet || ! git -C "$TOKENSAVE_SRC" diff --cached --quiet; then
       git -C "$TOKENSAVE_SRC" stash push -m "clorchestrate-tokensave-update"
       STASHED=true
     fi
-    $NEEDS_CHECKOUT && git -C "$TOKENSAVE_SRC" checkout "$DEFAULT_BRANCH"
-    $NEEDS_PULL     && git -C "$TOKENSAVE_SRC" pull origin "$DEFAULT_BRANCH" --ff-only
+    if [[ "$NEEDS_CHECKOUT" == true ]]; then git -C "$TOKENSAVE_SRC" checkout "$DEFAULT_BRANCH"; fi
+    if [[ "$NEEDS_PULL" == true ]]; then git -C "$TOKENSAVE_SRC" pull origin "$DEFAULT_BRANCH" --ff-only; fi
   fi
 
-  bash -lc "tokensave sync \"$TOKENSAVE_SRC\""
+  bash -lc "tokensave sync \"$TOKENSAVE_SRC\"" || echo "  warning: tokensave sync failed, continuing"
 
-  $NEEDS_CHECKOUT && git -C "$TOKENSAVE_SRC" checkout "$CURRENT_BRANCH"
-  $STASHED        && git -C "$TOKENSAVE_SRC" stash pop
+  if [[ "$NEEDS_CHECKOUT" == true ]]; then git -C "$TOKENSAVE_SRC" checkout "$CURRENT_BRANCH"; fi
+  if [[ "$STASHED" == true ]]; then git -C "$TOKENSAVE_SRC" stash pop; fi
 
   cp -a "$TOKENSAVE_SRC/.tokensave" "$WORKTREE_DIR/.tokensave"
   tmp="$WORKTREE_DIR/.tokensave/config.json"
