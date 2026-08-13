@@ -9,29 +9,35 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/chrisjensen/clorchestrate/internal/config"
+	"github.com/chrisjensen/clorchestrate/prompts"
 	"github.com/spf13/cobra"
 )
 
 func NewReviewCmd() *cobra.Command {
-	var evaluate bool
+	var evaluate, fresh bool
 	cmd := &cobra.Command{
 		Use:   "review [config]",
-		Short: "review token usage across benchmark sessions",
-		Long: `Scan benchmark worktrees and report token usage per label as TSV.
+		Short: "evaluate and compare benchmark implementations across command variants",
+		Long: `Compare benchmark worktrees across command variants and output results as TSV.
 
 Without a config argument all configs in ~/.clorchestrate/ are scanned.
 With a config argument only that config's worktrees are checked.
 
 Benchmark worktrees are directories whose name ends with a command label
-defined in the config's [[command]] blocks. Token data is read from the
-Claude Code JSONL transcript files stored under ~/.claude/projects/ on the
-machine where the sessions ran.
+defined in the config's [[command]] blocks.
 
-With --evaluate, a non-interactive Claude session is launched in the parent
-directory for each worktree to assess correctness and completeness across
-implementations. Evaluation columns are appended to the TSV output.`,
+With --evaluate, a non-interactive Claude session is launched in a detached
+screen session on the server for each worktree to assess correctness,
+completeness, clarity, and complexity across implementations. Each evaluation
+sees the other variants' worktrees for comparison. Output is written to a
+result file so that reconnecting after a dropped connection resumes rather
+than restarts. Evaluation columns are appended to the TSV output.
+
+With --fresh, cached result files and any running evaluation screen sessions
+are deleted before starting, forcing a full re-evaluation.`,
 		Args:              cobra.RangeArgs(0, 1),
 		ValidArgsFunction: completeConfigPaths,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -39,10 +45,11 @@ implementations. Evaluation columns are appended to the TSV output.`,
 			if len(args) > 0 {
 				configArg = args[0]
 			}
-			return reviewRun(configArg, evaluate)
+			return reviewRun(configArg, evaluate, fresh)
 		},
 	}
 	cmd.Flags().BoolVar(&evaluate, "evaluate", false, "launch evaluation agents per worktree and add quality columns to TSV")
+	cmd.Flags().BoolVar(&fresh, "fresh", false, "delete cached evaluation results and re-run (implies --evaluate)")
 	return cmd
 }
 
@@ -60,9 +67,10 @@ type tokenTotals struct {
 	homeDir   string
 	parent    string
 	claudeCmd string
-	eval      evalJSON
-	complete  int
-	prose     string
+	eval        evalJSON
+	complete    int
+	aspectCount int // count of aspects in this row's all_aspects list
+	prose       string
 }
 
 type evalJSON struct {
@@ -75,7 +83,10 @@ type evalJSON struct {
 	Missing     string `json:"missing"`
 }
 
-func reviewRun(configArg string, evaluate bool) error {
+func reviewRun(configArg string, evaluate, fresh bool) error {
+	if fresh {
+		evaluate = true
+	}
 	var configPaths []string
 	if configArg != "" {
 		p, err := resolveConfigPath(configArg)
@@ -99,6 +110,20 @@ func reviewRun(configArg string, evaluate bool) error {
 		}
 	}
 
+	// homeCache avoids repeated SSH round-trips for the same server.
+	homeCache := map[string]string{}
+	getHomeDir := func(server string) (string, error) {
+		if h, ok := homeCache[server]; ok {
+			return h, nil
+		}
+		h, err := remoteHomeDir(server)
+		if err != nil {
+			return "", err
+		}
+		homeCache[server] = h
+		return h, nil
+	}
+
 	var rows []tokenTotals
 	for _, cfgPath := range configPaths {
 		cfg, err := config.Parse(cfgPath)
@@ -110,52 +135,81 @@ func reviewRun(configArg string, evaluate bool) error {
 			continue
 		}
 
-		homeDir, err := remoteHomeDir(cfg.Server)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: skip %s: get home dir: %v\n", cfgPath, err)
-			continue
-		}
-
-		repo := strings.TrimRight(cfg.RemoteRepo, "/")
-		repo = expandHome(repo, homeDir)
-
-		parent := filepath.Dir(repo)
-		prefix := cfg.WorktreePrefix
-		if prefix == "" {
-			prefix = filepath.Base(repo)
-		}
-
 		cfgRowStart := len(rows)
+		// seen deduplicates worktree dirs that appear under multiple package prefixes.
+		seen := map[string]bool{}
 
-		for _, command := range cfg.Commands {
-			// Glob for worktrees ending with the label suffix.
-			pattern := filepath.Join(parent, prefix+"-*-"+command.Label)
-			matches, err := remoteGlob(cfg.Server, pattern)
+		// Scan base config then each package (packages may have a different
+		// worktree_prefix or remote_repo, producing differently-named worktree dirs).
+		scanCfgs := []*config.Config{cfg}
+		for _, pkg := range cfg.Packages {
+			pkgCfg, err := cfg.ResolvePackage(pkg.Name)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: glob %s: %v\n", pattern, err)
+				fmt.Fprintf(os.Stderr, "warning: resolve package %s: %v\n", pkg.Name, err)
+				continue
+			}
+			scanCfgs = append(scanCfgs, pkgCfg)
+		}
+
+		for _, scanCfg := range scanCfgs {
+			homeDir, err := getHomeDir(scanCfg.Server)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: get home dir: %v\n", err)
 				continue
 			}
 
-			for _, worktreeDir := range matches {
-				totals, err := readWorktreeTokens(cfg.Server, homeDir, worktreeDir)
+			repo := strings.TrimRight(scanCfg.RemoteRepo, "/")
+			repo = expandHome(repo, homeDir)
+			parent := filepath.Dir(repo)
+			prefix := scanCfg.WorktreePrefix
+			if prefix == "" {
+				prefix = filepath.Base(repo)
+			}
+
+			for _, command := range scanCfg.Commands {
+				// Glob for worktrees ending with the label suffix.
+				pattern := filepath.Join(parent, prefix+"-*-"+command.Label)
+				matches, err := remoteGlob(scanCfg.Server, pattern)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "warning: read tokens for %s: %v\n", worktreeDir, err)
+					fmt.Fprintf(os.Stderr, "warning: glob %s: %v\n", pattern, err)
 					continue
 				}
-				totals.label = command.Label
-				totals.worktree = filepath.Base(worktreeDir)
-				if evaluate {
-					totals.dir = worktreeDir
-					totals.server = cfg.Server
-					totals.homeDir = homeDir
-					totals.parent = parent
-					totals.claudeCmd = command.Cmd
+
+				for _, worktreeDir := range matches {
+					if seen[worktreeDir] {
+						continue
+					}
+					// Only evaluate worktrees where the session ran to completion.
+					if !remoteFileExists(scanCfg.Server, filepath.Join(worktreeDir, ".clorchestrate-done")) {
+						continue
+					}
+					seen[worktreeDir] = true
+
+					totals, err := readWorktreeTokens(scanCfg.Server, homeDir, worktreeDir)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "warning: read tokens for %s: %v\n", worktreeDir, err)
+						continue
+					}
+					totals.label = command.Label
+					totals.worktree = filepath.Base(worktreeDir)
+					if evaluate {
+						totals.dir = worktreeDir
+						totals.server = scanCfg.Server
+						totals.homeDir = homeDir
+						totals.parent = parent
+						totals.claudeCmd = command.Cmd
+					}
+					rows = append(rows, totals)
 				}
-				rows = append(rows, totals)
 			}
 		}
 
 		if evaluate && len(rows) > cfgRowStart {
+			if fresh {
+				for i := cfgRowStart; i < len(rows); i++ {
+					deleteEvalArtifacts(rows[i].server, rows[i].worktree)
+				}
+			}
 			// cfgRows is a slice of the same backing array — mutations propagate to rows.
 			cfgRows := rows[cfgRowStart:]
 			runGroupedEvaluations(cfgRows)
@@ -164,17 +218,19 @@ func reviewRun(configArg string, evaluate bool) error {
 
 	// Print TSV header then rows.
 	if evaluate {
-		fmt.Println("label\tworktree\tsessions\tinput_tokens\toutput_tokens\tcache_read_tokens\tcache_creation_tokens\tproblem\tclarity\tcomplexity\tcorrect\tcomplete\tmissing")
+		fmt.Println("label\tworktree\tsessions\tinput_tokens\toutput_tokens\tcache_read_tokens\tcache_creation_tokens\tproblem\tclarity\tcomplexity\tcorrect\tcomplete\tall_aspects\tall_aspects_count\tmissing\tmissing_count")
 		for _, r := range rows {
 			correctStr := ""
 			if r.eval.Correct != nil {
 				correctStr = fmt.Sprintf("%v", *r.eval.Correct)
 			}
-			fmt.Printf("%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%d\t%s\n",
+			fmt.Printf("%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%s\t%d\n",
 				r.label, r.worktree, r.sessions,
 				r.inputTokens, r.outputTokens, r.cacheReadTokens, r.cacheCreationTokens,
 				r.eval.Problem, r.eval.Clarity, r.eval.Complexity,
-				correctStr, r.complete, r.eval.Missing)
+				correctStr, r.complete,
+				r.eval.AllAspects, r.aspectCount,
+				r.eval.Missing, len(splitAspects(r.eval.Missing)))
 		}
 	} else {
 		fmt.Println("label\tworktree\tsessions\tinput_tokens\toutput_tokens\tcache_read_tokens\tcache_creation_tokens")
@@ -197,7 +253,21 @@ func runGroupedEvaluations(rows []tokenTotals) {
 		groups[taskKey] = append(groups[taskKey], i)
 	}
 
-	for _, indices := range groups {
+	for taskKey, indices := range groups {
+		allDone := true
+		for _, i := range indices {
+			r := rows[i]
+			doneFile := filepath.Join(r.dir, ".clorchestrate-done")
+			if !remoteFileExists(r.server, doneFile) {
+				fmt.Fprintf(os.Stderr, "skipping group %s: %s missing .clorchestrate-done\n", taskKey, r.worktree)
+				allDone = false
+				break
+			}
+		}
+		if !allDone {
+			continue
+		}
+
 		groupRows := make([]tokenTotals, len(indices))
 		for j, i := range indices {
 			groupRows[j] = rows[i]
@@ -212,7 +282,24 @@ func runGroupedEvaluations(rows []tokenTotals) {
 				}
 			}
 
-			prompt := buildEvalPrompt(target, others)
+			evalOthers := make([]prompts.EvalOther, len(others))
+			for i, o := range others {
+				evalOthers[i] = prompts.EvalOther{
+					Dir:         o.dir,
+					Label:       o.label,
+					ProjectsDir: claudeProjectsDir(o.homeDir, o.dir),
+				}
+			}
+			prompt, err := prompts.Eval(prompts.EvalData{
+				TargetDir:         target.dir,
+				TargetLabel:       target.label,
+				TargetProjectsDir: claudeProjectsDir(target.homeDir, target.dir),
+				Others:            evalOthers,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: build eval prompt for %s: %v\n", target.worktree, err)
+				continue
+			}
 			if err := writeEvalPrompt(target.server, target.worktree, prompt); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: write eval prompt for %s: %v\n", target.worktree, err)
 				continue
@@ -226,7 +313,11 @@ func runGroupedEvaluations(rows []tokenTotals) {
 
 			jsonStr, prose, err := extractJSONAndProse(rawOutput)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: parse evaluation output for %s: %v\n", target.worktree, err)
+				preview := strings.TrimSpace(rawOutput)
+				if len(preview) > 300 {
+					preview = preview[:300] + "..."
+				}
+				fmt.Fprintf(os.Stderr, "warning: parse evaluation output for %s: %v\n--- output ---\n%s\n---\n", target.worktree, err, preview)
 				continue
 			}
 
@@ -244,56 +335,6 @@ func runGroupedEvaluations(rows []tokenTotals) {
 	}
 }
 
-func buildEvalPrompt(target tokenTotals, others []tokenTotals) string {
-	targetProjectsDir := claudeProjectsDir(target.homeDir, target.dir)
-
-	var sb strings.Builder
-	sb.WriteString("You are evaluating a software implementation. You are running in the parent\n")
-	sb.WriteString("directory; do NOT cd into any worktree — that would create a new Claude session\n")
-	sb.WriteString("history for that directory and contaminate its token counts.\n\n")
-
-	sb.WriteString("The implementation you are evaluating:\n")
-	fmt.Fprintf(&sb, "  Directory:         %s\n", target.dir)
-	fmt.Fprintf(&sb, "  Label:             %s\n", target.label)
-	fmt.Fprintf(&sb, "  Conversation dir:  %s\n", targetProjectsDir)
-	sb.WriteString("  (find session: ls -t <above>/*.jsonl | head -1)\n\n")
-
-	if len(others) > 0 {
-		sb.WriteString("Other implementations of the same task:\n")
-		for _, o := range others {
-			oProjectsDir := claudeProjectsDir(o.homeDir, o.dir)
-			fmt.Fprintf(&sb, "  - %s  (label: %s)\n", o.dir, o.label)
-			fmt.Fprintf(&sb, "    Conversation dir: %s\n", oProjectsDir)
-		}
-		sb.WriteString("\n")
-	}
-
-	sb.WriteString(`Steps (use git -C <dir> flags instead of cd to avoid changing your working directory):
-1. For THIS implementation and each other implementation:
-   a. Review changes: git -C <dir> log --oneline HEAD
-   b. Review the diff: git -C <dir> diff HEAD~<n>
-   c. Read the most recent conversation:
-      ls -t <conversationDir>/*.jsonl | head -1 | xargs head -c 200000
-2. Compare all implementations.
-
-Output ONLY the following JSON block, then a blank line, then a prose description:
-
-{
-  "problem": "debug" or "feature",
-  "clarity": "well-specified" or "ambiguous",
-  "complexity": "easy" or "moderate" or "hard",
-  "correct": true or false,
-  "all_aspects": "comma-separated list of ALL implementation aspects seen across ALL directories",
-  "implemented": "comma-separated aspects present in THIS directory",
-  "missing": "comma-separated aspects absent from THIS directory"
-}
-
-After the JSON, write a succinct prose description of notable differences in THIS
-implementation only. Leave assessment of the other directories to their own evaluators.
-`)
-	return sb.String()
-}
-
 func writeEvalPrompt(server, worktreeBase, prompt string) error {
 	path := fmt.Sprintf("/tmp/clorchestrate-eval-%s.md", worktreeBase)
 	if server == "" {
@@ -308,31 +349,209 @@ func writeEvalPrompt(server, worktreeBase, prompt string) error {
 	return nil
 }
 
-func runEvaluation(server, parent, worktreeBase, claudeCmd string) (string, error) {
-	promptPath := fmt.Sprintf("/tmp/clorchestrate-eval-%s.md", worktreeBase)
-	shellCmd := fmt.Sprintf(`cd %s && %s --print "$(cat %s)"`, parent, claudeCmd, promptPath)
+func evalResultFile(worktreeBase string) string {
+	return fmt.Sprintf("/tmp/clorchestrate-eval-%s.out", worktreeBase)
+}
 
-	var cmd *exec.Cmd
+func evalScreenName(worktreeBase string) string {
+	return "clorchestrate-eval-" + worktreeBase
+}
+
+// remoteFileExists returns true if the file exists (may be empty).
+func remoteFileExists(server, path string) bool {
 	if server == "" {
-		cmd = exec.Command("sh", "-c", shellCmd)
+		_, err := os.Stat(path)
+		return err == nil
+	}
+	return exec.Command("ssh", server, fmt.Sprintf("test -f %s", path)).Run() == nil
+}
+
+// remoteFileNonEmpty returns true if the file exists and has non-zero size.
+func remoteFileNonEmpty(server, path string) bool {
+	if server == "" {
+		info, err := os.Stat(path)
+		return err == nil && info.Size() > 0
+	}
+	return exec.Command("ssh", server, fmt.Sprintf("test -s %s", path)).Run() == nil
+}
+
+// screenSessionRunning returns true if a screen session with the given name exists on the server.
+func screenSessionRunning(server, name string) bool {
+	if server == "" {
+		return false
+	}
+	return exec.Command("ssh", server, fmt.Sprintf("screen -ls | grep -qF '.%s'", name)).Run() == nil
+}
+
+// readRemoteFile reads a file from the server (or locally when server is "").
+func readRemoteFile(server, path string) (string, error) {
+	var out []byte
+	var err error
+	if server == "" {
+		out, err = os.ReadFile(path)
 	} else {
-		cmd = exec.Command("ssh", server, shellCmd)
+		out, err = exec.Command("ssh", server, fmt.Sprintf("cat %s", path)).Output()
 	}
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("run evaluation in %s: %w", parent, err)
+	if err != nil {
+		return "", fmt.Errorf("read result file %s: %w", path, err)
 	}
-	return stdout.String(), nil
+	return string(out), nil
+}
+
+// deleteEvalArtifacts removes the result file and kills any running screen session for a worktree.
+func deleteEvalArtifacts(server, worktreeBase string) {
+	resultFile := evalResultFile(worktreeBase)
+	screenName := evalScreenName(worktreeBase)
+	if server == "" {
+		os.Remove(resultFile)
+		return
+	}
+	shellCmd := fmt.Sprintf("rm -f %s; screen -S %s -X quit 2>/dev/null; true", resultFile, screenName)
+	exec.Command("ssh", server, shellCmd).Run() //nolint:errcheck
+}
+
+// isRetryableAPIError returns true when the output is an API-level error that is
+// worth retrying (e.g. 529 service overloaded). Other errors (auth, bad request)
+// are not retried since they will not resolve on their own.
+func isRetryableAPIError(output string) bool {
+	return strings.Contains(output, "API Error: 529")
+}
+
+// runEvaluation launches the evaluation for a single worktree, retrying up to 3
+// times if the result file contains a retryable API error (e.g. 529 overloaded).
+func runEvaluation(server, parent, worktreeBase, claudeCmd string) (string, error) {
+	const maxAttempts = 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		result, err := attemptEvaluation(server, parent, worktreeBase, claudeCmd)
+		if err != nil {
+			return "", err
+		}
+		if !isRetryableAPIError(result) {
+			return result, nil
+		}
+		if attempt < maxAttempts {
+			fmt.Fprintf(os.Stderr, "evaluation %s: 529 error (attempt %d/%d), retrying in 60s\n", worktreeBase, attempt, maxAttempts)
+			deleteEvalArtifacts(server, worktreeBase)
+			time.Sleep(60 * time.Second)
+		}
+	}
+	return "", fmt.Errorf("evaluation %s: failed after %d attempts (529 service overloaded)", worktreeBase, maxAttempts)
+}
+
+// attemptEvaluation runs a single evaluation attempt using a detached screen session
+// (remote) or backgrounded nohup process (local), writing output to a result file.
+// On re-run it reuses a cached result file or reconnects to an in-progress session.
+func attemptEvaluation(server, parent, worktreeBase, claudeCmd string) (string, error) {
+	promptPath := fmt.Sprintf("/tmp/clorchestrate-eval-%s.md", worktreeBase)
+	resultFile := evalResultFile(worktreeBase)
+	screenName := evalScreenName(worktreeBase)
+
+	// Cached: result file already written by a previous (possibly interrupted) run.
+	if remoteFileNonEmpty(server, resultFile) {
+		fmt.Fprintf(os.Stderr, "evaluation %s: using cached result\n", worktreeBase)
+		return readRemoteFile(server, resultFile)
+	}
+
+	// In-progress: screen session is still running from a dropped connection.
+	if screenSessionRunning(server, screenName) {
+		fmt.Fprintf(os.Stderr, "evaluation %s: reconnecting to running session\n", worktreeBase)
+	} else {
+		// Launch a new evaluation.
+		fmt.Fprintf(os.Stderr, "launching evaluation for %s\n", worktreeBase)
+		var cmd *exec.Cmd
+		if server == "" {
+			// nohup backgrounds the process so it survives terminal close / suspend.
+			shellCmd := fmt.Sprintf(
+				"nohup sh -c 'cd %s && %s --print \"$(cat %s)\" > %s 2>&1' >/dev/null 2>&1 &",
+				parent, claudeCmd, promptPath, resultFile,
+			)
+			cmd = exec.Command("sh", "-c", shellCmd)
+		} else {
+			// screen -dm starts detached; bash -lc sources the login profile for PATH.
+			screenCmd := fmt.Sprintf(
+				"screen -dmS %s bash -lc 'cd %s && %s --print \"$(cat %s)\" > %s 2>&1'",
+				screenName, parent, claudeCmd, promptPath, resultFile,
+			)
+			cmd = exec.Command("ssh", server, screenCmd)
+		}
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("launch evaluation for %s: %w", worktreeBase, err)
+		}
+	}
+
+	// Poll until the result file appears (local) or the screen session exits (remote).
+	fmt.Fprintf(os.Stderr, "waiting for evaluation %s...\n", worktreeBase)
+	for {
+		time.Sleep(10 * time.Second)
+
+		if server != "" && screenSessionRunning(server, screenName) {
+			continue
+		}
+
+		if remoteFileNonEmpty(server, resultFile) {
+			fmt.Fprintf(os.Stderr, "evaluation %s: complete\n", worktreeBase)
+			return readRemoteFile(server, resultFile)
+		}
+
+		if server == "" {
+			// Local process still running — keep polling until the file appears.
+			continue
+		}
+
+		// Remote: screen session exited but no result file — process likely failed.
+		return "", fmt.Errorf("evaluation %s: screen session exited without producing output", worktreeBase)
+	}
+}
+
+// findJSONBounds returns the start index and one-past-end index of the first
+// complete JSON object in s, walking character by character to correctly match
+// braces inside strings and ignore braces in surrounding prose.
+func findJSONBounds(s string) (start, end int, ok bool) {
+	start = strings.Index(s, "{")
+	if start == -1 {
+		return 0, 0, false
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch c {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return start, i + 1, true
+			}
+		}
+	}
+	return 0, 0, false
 }
 
 // extractJSONAndProse finds the JSON object in output (stripping markdown code fences and
 // surrounding prose) and returns it along with any trailing prose description.
+// The output may contain prose before the JSON, a ```json fence around it, or both.
 func extractJSONAndProse(output string) (string, string, error) {
 	s := strings.TrimSpace(output)
 
-	// Handle markdown code fences (```json...``` or ```...```)
+	// If there's a code fence anywhere, extract the JSON from inside it.
+	// Any text before the opening fence or after the closing fence becomes part of prose.
 	if fenceIdx := strings.Index(s, "```"); fenceIdx != -1 {
 		inner := s[fenceIdx+3:]
 		// skip optional language tag line (e.g. "json\n")
@@ -341,56 +560,50 @@ func extractJSONAndProse(output string) (string, string, error) {
 		}
 		if closeIdx := strings.Index(inner, "```"); closeIdx != -1 {
 			candidate := strings.TrimSpace(inner[:closeIdx])
-			prose := strings.TrimSpace(inner[closeIdx+3:])
-			if start := strings.Index(candidate, "{"); start != -1 {
-				if end := strings.LastIndex(candidate, "}"); end > start {
-					jsonStr := candidate[start : end+1]
-					if json.Valid([]byte(jsonStr)) {
-						return jsonStr, prose, nil
-					}
+			// Prose = text before the opening fence + text after the closing fence.
+			beforeFence := strings.TrimSpace(s[:fenceIdx])
+			afterFence := strings.TrimSpace(inner[closeIdx+3:])
+			prose := strings.TrimSpace(beforeFence + "\n\n" + afterFence)
+			if start, end, ok := findJSONBounds(candidate); ok {
+				jsonStr := candidate[start:end]
+				if json.Valid([]byte(jsonStr)) {
+					return jsonStr, prose, nil
 				}
 			}
 		}
 	}
 
-	// Fall back: find outermost { ... } in raw output
-	start := strings.Index(s, "{")
-	if start == -1 {
+	// No fences (or fence extraction failed): find first complete JSON object by
+	// depth-counting braces so prose containing { } doesn't confuse the parser.
+	start, end, ok := findJSONBounds(s)
+	if !ok {
 		return "", "", fmt.Errorf("no JSON object found in evaluation output")
 	}
-	end := strings.LastIndex(s, "}")
-	if end <= start {
-		return "", "", fmt.Errorf("no closing } found in evaluation output")
-	}
-	jsonStr := s[start : end+1]
+	jsonStr := s[start:end]
 	if !json.Valid([]byte(jsonStr)) {
 		return "", "", fmt.Errorf("invalid JSON in evaluation output")
 	}
-	prose := strings.TrimSpace(s[end+1:])
+	prose := strings.TrimSpace(s[end:])
 	return jsonStr, prose, nil
 }
 
-// computeCompleteness merges all_aspects across a task group and sets each row's complete
-// field to the percentage of global aspects that row's implementation covers.
+// computeCompleteness sets each row's complete score independently using its own all_aspects
+// and missing lists. Score = (all_aspects_count - missing_count) * 100 / all_aspects_count.
+// Scores across rows in a group are not directly comparable (each LLM uses its own phrasing)
+// but each score is internally consistent and meaningful.
 func computeCompleteness(rows []tokenTotals, indices []int) {
-	globalAspects := map[string]bool{}
 	for _, i := range indices {
-		for _, a := range splitAspects(rows[i].eval.AllAspects) {
-			globalAspects[a] = true
+		allCount := len(splitAspects(rows[i].eval.AllAspects))
+		if allCount == 0 {
+			continue
 		}
-	}
-	total := len(globalAspects)
-	if total == 0 {
-		return
-	}
-	for _, i := range indices {
-		count := 0
-		for _, a := range splitAspects(rows[i].eval.Implemented) {
-			if globalAspects[a] {
-				count++
-			}
+		missingCount := len(splitAspects(rows[i].eval.Missing))
+		score := (allCount - missingCount) * 100 / allCount
+		if score < 0 {
+			score = 0
 		}
-		rows[i].complete = count * 100 / total
+		rows[i].complete = score
+		rows[i].aspectCount = allCount
 	}
 }
 
