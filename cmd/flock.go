@@ -38,10 +38,10 @@ Task file format:
   base: <ref>                    Optional. Overrides the default base
                                  branch for this task only.
 
-  package: <name>                Optional. Selects a [[package]] from the
-                                 config; the package's fields override the
-                                 top-level config for this task. Omit to
-                                 use the top-level config as-is. Run
+  package: <name>                Required when the config defines packages.
+                                 Selects a [[package]] from the config;
+                                 the package's fields override the global
+                                 config for this task. Run
                                  'flock <config> --help' to list packages
                                  defined in a given config.
 
@@ -138,6 +138,11 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 	}
 
 	for _, t := range tasks {
+		if len(cfg.Packages) > 0 && t.Package == "" {
+			fmt.Fprintf(os.Stderr, "error: task %q has no 'package:' but config defines packages — skipping\n", t.Handle)
+			continue
+		}
+
 		effectiveCfg, err := cfg.ResolvePackage(t.Package)
 		if err != nil {
 			return fmt.Errorf("task %s: %w", t.Handle, err)

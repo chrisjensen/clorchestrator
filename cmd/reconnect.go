@@ -110,7 +110,8 @@ func reconnectRun(args []string, force bool) error {
 			}
 			// Also match sessions created by --restart, which are named after
 			// the worktree dir basename (<worktreePrefix>-<branch>).
-			if e.cfg.RemoteRepo != "" {
+			// Skip when packages are defined — those matchers are built per-package below.
+			if e.cfg.RemoteRepo != "" && len(e.cfg.Packages) == 0 {
 				repo := strings.TrimRight(e.cfg.RemoteRepo, "/")
 				if lastSlash := strings.LastIndex(repo, "/"); lastSlash >= 0 {
 					wtPrefix := e.cfg.WorktreePrefix
@@ -311,7 +312,10 @@ func reconnectRestart(args []string) error {
 	byServer := map[string][]repoTarget{}
 	for _, e := range entries {
 		color := config.ResolveTabColor(e.cfg.ITermTabColor, e.path)
-		targets := []repoTarget{{e.cfg.RemoteRepo, e.cfg.WorktreePrefix, color}}
+		var targets []repoTarget
+		if len(e.cfg.Packages) == 0 {
+			targets = []repoTarget{{e.cfg.RemoteRepo, e.cfg.WorktreePrefix, color}}
+		}
 		for _, pkg := range e.cfg.Packages {
 			if pkg.RemoteRepo == "" {
 				continue

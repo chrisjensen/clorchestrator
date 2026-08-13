@@ -61,6 +61,7 @@ type Package struct {
 	WorktreePrefix     string `toml:"worktree_prefix"`
 	ITermTabColor      string `toml:"iterm_tab_color"`      // color for claude/work sessions on this package
 	PackageRunnerColor string `toml:"package_runner_color"` // color for the start_cmd runner session
+	PlanningContext    string `toml:"planning_context"`
 }
 
 type Config struct {
@@ -76,6 +77,7 @@ type Config struct {
 	PlanningContext  string    `toml:"planning_context"`
 	DispatchMode     string    `toml:"dispatch_mode"`
 	ID               string    `toml:"id"`
+	Name             string    `toml:"name"`
 	Packages         []Package `toml:"package"`
 	Commands         []Command `toml:"command"`
 }
@@ -124,15 +126,27 @@ func (c *Config) ResolveCommand(s string) (Command, error) {
 
 // ResolvePackage returns a copy of the config with the named package's fields
 // overlaid. Fields set on the package override the global value; unset fields
-// fall back to the global value. Returns the config unchanged when name is
-// empty (backward-compatible with configs that have no [[package]] blocks).
+// fall back to the global value. When name is empty and no packages are
+// defined, returns the config unchanged. When name is empty but packages are
+// defined, returns an error — every package must be selected explicitly.
 func (c *Config) ResolvePackage(name string) (*Config, error) {
 	if name == "" {
+		if len(c.Packages) > 0 {
+			return nil, fmt.Errorf("config defines packages — specify one with --package or 'package:' in the task file")
+		}
 		return c, nil
 	}
 	for _, pkg := range c.Packages {
 		if pkg.Name == name {
 			resolved := *c
+			// Clear package-level fields so stale global values don't silently
+			// bleed into resolved configs — packages must set them explicitly.
+			resolved.RemoteRepo = ""
+			resolved.BranchRepo = ""
+			resolved.WorktreePrefix = ""
+			resolved.PostSetupCmd = ""
+			resolved.ITermTabColor = ""
+			resolved.PlanningContext = ""
 			if pkg.RemoteRepo != "" {
 				resolved.RemoteRepo = pkg.RemoteRepo
 			}
@@ -154,6 +168,9 @@ func (c *Config) ResolvePackage(name string) (*Config, error) {
 			if pkg.WorktreePrefix != "" {
 				resolved.WorktreePrefix = pkg.WorktreePrefix
 			}
+			if pkg.PlanningContext != "" {
+				resolved.PlanningContext = pkg.PlanningContext
+			}
 			return &resolved, nil
 		}
 	}
@@ -171,6 +188,9 @@ func ConfigID(configPath string) (string, error) {
 	}
 	if cfg.ID != "" {
 		return cfg.ID, nil
+	}
+	if cfg.Name != "" {
+		return cfg.Name, nil
 	}
 
 	stem := strings.TrimSuffix(filepath.Base(configPath), ".toml")
