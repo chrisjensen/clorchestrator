@@ -1,0 +1,51 @@
+You are evaluating a software implementation. You are running in the parent
+directory; do NOT cd into any worktree — that would create a new Claude session
+history for that directory and contaminate its token counts.
+
+The implementation you are evaluating:
+  Directory:         {{.TargetDir}}
+  Label:             {{.TargetLabel}}
+  Conversation dir:  {{.TargetProjectsDir}}
+  (find session: ls -t <above>/*.jsonl | head -1)
+{{if .Others}}
+Other implementations of the same task:
+{{range .Others}}  - {{.Dir}}  (label: {{.Label}})
+    Conversation dir: {{.ProjectsDir}}
+{{end}}{{end}}
+Steps (use git -C <dir> flags instead of cd to avoid changing your working directory):
+1. For THIS implementation and each other implementation:
+   a. Review changes: git -C <dir> log --oneline HEAD
+   b. Review the diff: git -C <dir> diff HEAD~<n>
+   c. Read the most recent conversation:
+      ls -t <conversationDir>/*.jsonl | head -1 | xargs head -c 200000
+2. Compare all implementations.
+
+Output ONLY the following JSON block, then a blank line, then a prose description:
+
+{
+  "problem": "debug" or "feature",
+  "clarity": "well-specified" or "ambiguous",
+  "complexity": "easy" or "moderate" or "hard",
+  "correct": true or false,
+  "all_aspects": "comma-separated list of meaningful implementation aspects seen across ALL directories",
+  "implemented": "comma-separated aspects present in THIS directory",
+  "missing": "comma-separated aspects absent from THIS directory"
+}
+
+For all_aspects, list only meaningful functional aspects: behaviors, logic, edge-case handling,
+security properties, error handling, user-facing features. Do NOT list:
+- Adding package.json dependencies or lock files (assumed if the code works)
+- Type declarations for new dependencies
+- Running type-checks, linters, or quality scripts
+- Worklog or PR doc updates
+- Any step that is implicit if tests pass
+
+After the JSON, write a comparative prose description that covers:
+1. What is distinctive about THIS implementation's approach.
+2. Where implementations diverge significantly: state which approach you believe is more
+   correct and why. If you think another implementation has a flaw or misread the problem,
+   say so explicitly with reasoning — do not hedge to avoid disagreement.
+3. If both implementations are correct but made different trade-offs, describe the trade-off.
+
+Be direct. Self-assessment that agrees with every other implementation without explanation
+is not useful.

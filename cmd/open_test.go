@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/chrisjensen/clorchestrate/internal/config"
+	"github.com/chrisjensen/clorchestrate/prompts"
 )
 
 func TestDetectMode(t *testing.T) {
@@ -148,6 +149,13 @@ func TestBuildFollowupCmd(t *testing.T) {
 	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", true, false, defaultCmd); got != "" {
 		t.Errorf("noClaude ModeWorktree should suppress followup: got %q", got)
 	}
+	templateCmd := "kopencode --agent plan --prompt {prompt}"
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false, true, templateCmd); got != `cd ~/src/extractor-branch-x && kopencode --agent plan --prompt "$(cat /tmp/task-h.prompt.md)"` {
+		t.Errorf("template with prompt: got %q", got)
+	}
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false, false, templateCmd); got != "cd ~/src/extractor-branch-x && kopencode --agent plan --prompt {prompt}" {
+		t.Errorf("template no prompt: got %q", got)
+	}
 }
 
 func TestWorktreePath(t *testing.T) {
@@ -221,7 +229,16 @@ func TestParseScreenLs(t *testing.T) {
 }
 
 func TestBuildPrompt(t *testing.T) {
-	got := buildPrompt("42", "org/repo", "ctx-here", "extra-here")
+	got, err := prompts.Prompt(prompts.PromptData{
+		IssueNum:        "42",
+		IssueRepo:       "org/repo",
+		IssueURL:        "https://github.com/org/repo/issues/42",
+		PlanningContext: "ctx-here",
+		ExtraContext:    "extra-here",
+	})
+	if err != nil {
+		t.Fatalf("prompts.Issue: %v", err)
+	}
 	for _, want := range []string{
 		"issue #42 in org/repo",
 		"https://github.com/org/repo/issues/42",

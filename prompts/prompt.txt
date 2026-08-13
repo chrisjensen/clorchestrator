@@ -1,0 +1,18 @@
+{{if .IssueNum}}You are implementing GitHub issue #{{.IssueNum}} in {{.IssueRepo}}.{{else if .Description}}You are working on the following task.{{end}}
+
+## Repo context
+{{.PlanningContext}}
+
+{{if .IssueNum}}## Issue + discussion (must review first)
+Open {{.IssueURL}} and review:
+- the issue description
+- all comments/discussion (including any linked PRs, decisions, edge cases, and constraints)
+
+## Additional context
+{{.ExtraContext}}{{else if .Description}}## Task description
+{{.Description}}{{end}}
+
+## Planning instructions
+- Ensure the plan is consistent with the existing architecture and patterns of the codebase
+- After generating the plan, check what was missed from the plan
+- The current working directory is a git worktree, ensure all changes land in this worktree unless directly instructed otherwise

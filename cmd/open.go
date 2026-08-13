@@ -13,6 +13,7 @@ import (
 	"github.com/chrisjensen/clorchestrate/internal/iterm"
 	"github.com/chrisjensen/clorchestrate/internal/sync"
 	"github.com/chrisjensen/clorchestrate/internal/taskfile"
+	"github.com/chrisjensen/clorchestrate/prompts"
 	"github.com/chrisjensen/clorchestrate/scripts"
 	"github.com/spf13/cobra"
 )
@@ -228,9 +229,30 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		if !opts.noClaude {
 			var prompt string
 			if mode == ModeFullTask {
-				prompt = buildPrompt(issueNum, cfg.IssueRepo, cfg.PlanningContext, opts.extraContext)
-			} else if mode == ModeWorktree && opts.extraContext != "" {
-				prompt = buildTaskPrompt(cfg.PlanningContext, opts.extraContext)
+				p, err := prompts.Prompt(prompts.PromptData{
+					IssueNum:        issueNum,
+					IssueRepo:       cfg.IssueRepo,
+					IssueURL:        fmt.Sprintf("https://github.com/%s/issues/%s", cfg.IssueRepo, issueNum),
+					PlanningContext: cfg.PlanningContext,
+					ExtraContext:    opts.extraContext,
+				})
+				if err != nil {
+					return fmt.Errorf("building issue prompt: %w", err)
+				}
+				prompt = p
+			} else if mode == ModeWorktree && (opts.extraContext != "" || opts.benchmarkLabel != "") {
+				p, err := prompts.Prompt(prompts.PromptData{
+					PlanningContext: cfg.PlanningContext,
+					Description:     opts.extraContext,
+				})
+				if err != nil {
+					return fmt.Errorf("building task prompt: %w", err)
+				}
+				prompt = p
+			}
+			if opts.benchmarkLabel != "" && prompt != "" {
+				prompt += "\n- Once committed and any quality checks have been completed, touch the file .clorchestrate-done in the working directory.\n" +
+					"- .clorchestrate-done MUST NOT be committed — it must remain a local-only file. Add it to .gitignore if necessary.\n"
 			}
 			if prompt != "" {
 				if err := writePromptFile(cfg.Server, handle, prompt); err != nil {
@@ -381,45 +403,6 @@ func runSetup(server, handle string) error {
 	return cmd.Run()
 }
 
-// buildTaskPrompt returns a prompt for a task with no GitHub issue.
-func buildTaskPrompt(planningContext, description string) string {
-	return fmt.Sprintf(`You are working on the following task.
-
-## Repo context
-%s
-
-## Task description
-%s
-
-## Planning instructions
-- Ensure the plan is consistent with the existing architecture and patterns of the codebase
-- After generating the plan, check what was missed from the plan
-`, planningContext, description)
-}
-
-// buildPrompt returns the markdown prompt body (no surrounding quotes) that
-// will be written to /tmp/task-<handle>.prompt.md and passed to claude.
-func buildPrompt(issueNum, issueRepo, planningContext, extraContext string) string {
-	issueURL := fmt.Sprintf("https://github.com/%s/issues/%s", issueRepo, issueNum)
-	return fmt.Sprintf(`You are implementing GitHub issue #%s in %s.
-
-## Repo context
-%s
-
-## Issue + discussion (must review first)
-Open %s and review:
-- the issue description
-- all comments/discussion (including any linked PRs, decisions, edge cases, and constraints)
-
-## Additional context
-%s
-
-## Planning instructions
-- Ensure the plan is consistent with the existing architecture and patterns of the codebase
-- After generating the plan, check what was missed from the plan
-`, issueNum, issueRepo, planningContext, issueURL, extraContext)
-}
-
 // resolveConfigPath expands a bare name (no path separators) to
 // ~/.clorchestrate/{name}.toml. Full and relative paths are returned as-is.
 func resolveConfigPath(name string) (string, error) {
@@ -536,7 +519,12 @@ func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string, noC
 	switch mode {
 	case ModeFullTask, ModeWorktree:
 		if withPrompt {
-			return fmt.Sprintf(`cd %s && %s --permission-mode plan "$(cat /tmp/task-%s.prompt.md)"`, worktreeDir, claudeCmd, handle)
+			promptExpr := fmt.Sprintf(`"$(cat /tmp/task-%s.prompt.md)"`, handle)
+			if strings.Contains(claudeCmd, "{prompt}") {
+				expanded := strings.ReplaceAll(claudeCmd, "{prompt}", promptExpr)
+				return fmt.Sprintf("cd %s && %s", worktreeDir, expanded)
+			}
+			return fmt.Sprintf(`cd %s && %s --permission-mode plan %s`, worktreeDir, claudeCmd, promptExpr)
 		}
 		return fmt.Sprintf(`cd %s && %s`, worktreeDir, claudeCmd)
 	}
