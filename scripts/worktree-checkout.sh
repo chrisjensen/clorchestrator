@@ -44,10 +44,10 @@ if [[ -d "$WORKTREE_DIR" ]]; then
   echo "=== Resuming existing worktree ==="
   echo "  Path:   $WORKTREE_DIR"
   echo "  Branch: $BRANCH"
-  if [[ -d "$WORKTREE_DIR/.tokensave" ]]; then
-    echo "  tokensave: present"
+  if [[ -d "$WORKTREE_DIR/.serena" ]]; then
+    echo "  serena: present"
   else
-    echo "  tokensave: not found"
+    echo "  serena: not found"
   fi
   start_background_setup
   exit 0
@@ -55,7 +55,7 @@ fi
 
 # --- Fresh setup path ---
 cd "$REPO_ROOT"
-git fetch origin
+git fetch origin "$BRANCH"
 
 # Drop stale worktree registrations so a worktree dir that was deleted without
 # `git worktree remove` doesn't block re-adding it here.
@@ -95,50 +95,17 @@ else
   git -C "$REPO_ROOT" worktree add -b "$BRANCH" "$WORKTREE_DIR"
 fi
 
-TOKENSAVE_SRC="$(git -C "$REPO_ROOT" worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
-if [[ -d "$TOKENSAVE_SRC/.tokensave" ]]; then
-  echo "Updating tokensave on main worktree before seeding..."
-
-  DEFAULT_BRANCH=$(git -C "$TOKENSAVE_SRC" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|.*/||')
-  DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
-
-  # Fetch all refs non-fatally; a missing/unreachable branch must not kill setup.
-  git -C "$TOKENSAVE_SRC" fetch origin --quiet 2>/dev/null || echo "  warning: git fetch failed, continuing with local state"
-
-  CURRENT_BRANCH=$(git -C "$TOKENSAVE_SRC" symbolic-ref --short HEAD 2>/dev/null || true)
-  NEEDS_CHECKOUT=false
-  if [[ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]]; then NEEDS_CHECKOUT=true; fi
-
-  NEEDS_PULL=false
-  if [[ "$(git -C "$TOKENSAVE_SRC" rev-parse HEAD 2>/dev/null || true)" != "$(git -C "$TOKENSAVE_SRC" rev-parse "origin/$DEFAULT_BRANCH" 2>/dev/null || true)" ]]; then
-    NEEDS_PULL=true
+SERENA_SRC="$(git -C "$REPO_ROOT" worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
+if [[ -d "$SERENA_SRC/.serena" ]]; then
+  # Copy .serena from main worktree, excluding cache/ (LSP index rebuilds automatically).
+  rsync -a --exclude='cache/' "$SERENA_SRC/.serena/" "$WORKTREE_DIR/.serena/"
+  # Update project_name in project.local.yml to match the new worktree directory name.
+  local_yml="$WORKTREE_DIR/.serena/project.local.yml"
+  if [[ -f "$local_yml" ]]; then
+    WORKTREE_NAME="$(basename "$WORKTREE_DIR")"
+    sed -i "s|^project_name:.*|project_name: \"$WORKTREE_NAME\"|" "$local_yml"
   fi
-
-  STASHED=false
-  if [[ "$NEEDS_CHECKOUT" == true ]] || [[ "$NEEDS_PULL" == true ]]; then
-    if ! git -C "$TOKENSAVE_SRC" diff --quiet || ! git -C "$TOKENSAVE_SRC" diff --cached --quiet; then
-      git -C "$TOKENSAVE_SRC" stash push -m "clorchestrate-tokensave-update"
-      STASHED=true
-    fi
-    if [[ "$NEEDS_CHECKOUT" == true ]]; then git -C "$TOKENSAVE_SRC" checkout "$DEFAULT_BRANCH"; fi
-    if [[ "$NEEDS_PULL" == true ]]; then git -C "$TOKENSAVE_SRC" pull origin "$DEFAULT_BRANCH" --ff-only; fi
-  fi
-
-  bash -lc "tokensave sync \"$TOKENSAVE_SRC\"" || echo "  warning: tokensave sync failed, continuing"
-
-  if [[ "$NEEDS_CHECKOUT" == true ]]; then git -C "$TOKENSAVE_SRC" checkout "$CURRENT_BRANCH"; fi
-  if [[ "$STASHED" == true ]]; then git -C "$TOKENSAVE_SRC" stash pop; fi
-
-  cp -a "$TOKENSAVE_SRC/.tokensave" "$WORKTREE_DIR/.tokensave"
-  tmp="$WORKTREE_DIR/.tokensave/config.json"
-  if [[ -f "$tmp" ]]; then
-    if command -v jq &>/dev/null; then
-      jq --arg r "$WORKTREE_DIR" '.root_dir=$r' "$tmp" > "$tmp.new" && mv "$tmp.new" "$tmp"
-    else
-      sed -i "s|\"root_dir\":\"[^\"]*\"|\"root_dir\":\"$WORKTREE_DIR\"|" "$tmp"
-    fi
-  fi
-  echo "Seeded .tokensave from $TOKENSAVE_SRC (pre-synced)"
+  echo "Seeded .serena from $SERENA_SRC (cache excluded)"
 fi
 
 if [[ -d "$REPO_ROOT/.claude" ]]; then
