@@ -17,7 +17,7 @@ import (
 )
 
 func NewReviewCmd() *cobra.Command {
-	var evaluate, fresh bool
+	var evaluate, fresh, force bool
 	cmd := &cobra.Command{
 		Use:   "review [config]",
 		Short: "evaluate and compare benchmark implementations across command variants",
@@ -37,7 +37,14 @@ result file so that reconnecting after a dropped connection resumes rather
 than restarts. Evaluation columns are appended to the TSV output.
 
 With --fresh, cached result files and any running evaluation screen sessions
-are deleted before starting, forcing a full re-evaluation.`,
+are deleted before starting, forcing a full re-evaluation.
+
+A task's variants are only evaluated once every benchmark label configured
+for its worktree has finished (has a .clorchestrate-done marker in an
+existing sibling worktree) — otherwise the group is skipped with a warning
+so comparisons aren't made against still-running siblings. With --force,
+evaluation proceeds using whichever variants are done, even if others are
+still running.`,
 		Args:              cobra.RangeArgs(0, 1),
 		ValidArgsFunction: completeConfigPaths,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -45,11 +52,12 @@ are deleted before starting, forcing a full re-evaluation.`,
 			if len(args) > 0 {
 				configArg = args[0]
 			}
-			return reviewRun(configArg, evaluate, fresh)
+			return reviewRun(configArg, evaluate, fresh, force)
 		},
 	}
 	cmd.Flags().BoolVar(&evaluate, "evaluate", false, "launch evaluation agents per worktree and add quality columns to TSV")
 	cmd.Flags().BoolVar(&fresh, "fresh", false, "delete cached evaluation results and re-run (implies --evaluate)")
+	cmd.Flags().BoolVar(&force, "force", false, "evaluate a task's variants even if some haven't finished (missing .clorchestrate-done)")
 	return cmd
 }
 
@@ -62,11 +70,12 @@ type tokenTotals struct {
 	cacheReadTokens     int
 	cacheCreationTokens int
 	// populated when --evaluate is set
-	dir       string
-	server    string
-	homeDir   string
-	parent    string
-	claudeCmd string
+	dir         string
+	server      string
+	homeDir     string
+	parent      string
+	claudeCmd   string
+	skipEval    bool // set when this row's task-group has an incomplete sibling and --force wasn't passed
 	eval        evalJSON
 	complete    int
 	aspectCount int // count of aspects in this row's all_aspects list
@@ -83,7 +92,7 @@ type evalJSON struct {
 	Missing     string `json:"missing"`
 }
 
-func reviewRun(configArg string, evaluate, fresh bool) error {
+func reviewRun(configArg string, evaluate, fresh, force bool) error {
 	if fresh {
 		evaluate = true
 	}
@@ -166,6 +175,7 @@ func reviewRun(configArg string, evaluate, fresh bool) error {
 				prefix = filepath.Base(repo)
 			}
 
+			scanCfgStart := len(rows)
 			for _, command := range scanCfg.Commands {
 				// Glob for worktrees ending with the label suffix.
 				pattern := filepath.Join(parent, prefix+"-*-"+command.Label)
@@ -210,6 +220,10 @@ func reviewRun(configArg string, evaluate, fresh bool) error {
 					rows = append(rows, totals)
 				}
 			}
+
+			if evaluate {
+				markIncompleteGroups(rows[scanCfgStart:], scanCfg, force)
+			}
 		}
 
 		if evaluate && len(rows) > cfgRowStart {
@@ -251,31 +265,71 @@ func reviewRun(configArg string, evaluate, fresh bool) error {
 	return nil
 }
 
+// markIncompleteGroups checks, for each distinct task key among rows, whether
+// every other command label configured for scanCfg that has an existing
+// worktree for that task has finished (.clorchestrate-done present). A
+// sibling label only counts if its worktree directory exists on disk, so
+// --benchmark runs that only used a subset of the configured labels aren't
+// penalized for labels that were never run.
+//
+// If a task has an existing-but-unfinished sibling and force is false, every
+// row sharing that task key is marked skipEval so runGroupedEvaluations will
+// leave it out of the comparison (it still appears in the plain TSV output).
+// If force is true, the task proceeds using whichever siblings are done.
+func markIncompleteGroups(rows []tokenTotals, scanCfg *config.Config, force bool) {
+	checked := map[string]bool{}
+	for i := range rows {
+		taskKey := strings.TrimSuffix(rows[i].worktree, "-"+rows[i].label)
+		if checked[taskKey] {
+			continue
+		}
+		checked[taskKey] = true
+
+		var missing []string
+		for _, cmd := range scanCfg.Commands {
+			if cmd.Label == rows[i].label {
+				continue
+			}
+			siblingDir := filepath.Join(rows[i].parent, taskKey+"-"+cmd.Label)
+			if !remoteDirExists(rows[i].server, siblingDir) {
+				continue // that label was never run for this task
+			}
+			if !remoteFileExists(rows[i].server, filepath.Join(siblingDir, ".clorchestrate-done")) {
+				missing = append(missing, cmd.Label)
+			}
+		}
+		if len(missing) == 0 {
+			continue
+		}
+
+		if force {
+			fmt.Fprintf(os.Stderr, "group %s: evaluating despite incomplete siblings %v (--force)\n", taskKey, missing)
+			continue
+		}
+
+		fmt.Fprintf(os.Stderr, "skipping group %s: siblings not done yet: %v\n", taskKey, missing)
+		for j := range rows {
+			if strings.TrimSuffix(rows[j].worktree, "-"+rows[j].label) == taskKey {
+				rows[j].skipEval = true
+			}
+		}
+	}
+}
+
 // runGroupedEvaluations groups rows by task key (worktree base name with label suffix stripped),
 // then launches an evaluation agent for each directory in a group, informing it of the others.
 // Evaluation results are written back into the rows slice in place.
 func runGroupedEvaluations(rows []tokenTotals) {
 	groups := map[string][]int{}
 	for i, r := range rows {
+		if r.skipEval {
+			continue
+		}
 		taskKey := strings.TrimSuffix(r.worktree, "-"+r.label)
 		groups[taskKey] = append(groups[taskKey], i)
 	}
 
-	for taskKey, indices := range groups {
-		allDone := true
-		for _, i := range indices {
-			r := rows[i]
-			doneFile := filepath.Join(r.dir, ".clorchestrate-done")
-			if !remoteFileExists(r.server, doneFile) {
-				fmt.Fprintf(os.Stderr, "skipping group %s: %s missing .clorchestrate-done\n", taskKey, r.worktree)
-				allDone = false
-				break
-			}
-		}
-		if !allDone {
-			continue
-		}
-
+	for _, indices := range groups {
 		groupRows := make([]tokenTotals, len(indices))
 		for j, i := range indices {
 			groupRows[j] = rows[i]
@@ -372,6 +426,15 @@ func remoteFileExists(server, path string) bool {
 		return err == nil
 	}
 	return exec.Command("ssh", server, fmt.Sprintf("test -f %s", path)).Run() == nil
+}
+
+// remoteDirExists returns true if path exists and is a directory.
+func remoteDirExists(server, path string) bool {
+	if server == "" {
+		info, err := os.Stat(path)
+		return err == nil && info.IsDir()
+	}
+	return exec.Command("ssh", server, fmt.Sprintf("test -d %s", path)).Run() == nil
 }
 
 // remoteFileNonEmpty returns true if the file exists and has non-zero size.
