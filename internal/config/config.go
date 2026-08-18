@@ -43,9 +43,10 @@ func ResolveTabColor(rawValue, configPath string) string {
 // The entry with Default=true (or the first entry if none is marked) is used
 // for all normal sessions. All entries are available for --benchmark runs.
 type Command struct {
-	Label   string `toml:"label"`
-	Cmd     string `toml:"cmd"`
-	Default bool   `toml:"default"`
+	Label        string `toml:"label"`
+	Cmd          string `toml:"cmd"`
+	Default      bool   `toml:"default"`
+	EvaluateWith string `toml:"evaluate_with"`
 }
 
 // Package describes a library or package within a project that may have its own repo,

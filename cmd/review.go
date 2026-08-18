@@ -198,6 +198,14 @@ func reviewRun(configArg string, evaluate, fresh bool) error {
 						totals.homeDir = homeDir
 						totals.parent = parent
 						totals.claudeCmd = command.Cmd
+						if command.EvaluateWith != "" {
+							evalCmd, err := scanCfg.ResolveCommand(command.EvaluateWith)
+							if err != nil {
+								fmt.Fprintf(os.Stderr, "warning: evaluate_with %q for command %q: %v\n", command.EvaluateWith, command.Label, err)
+							} else {
+								totals.claudeCmd = evalCmd.Cmd
+							}
+						}
 					}
 					rows = append(rows, totals)
 				}
