@@ -35,6 +35,7 @@ type EvalData struct {
 	TargetDir         string
 	TargetLabel       string
 	TargetProjectsDir string
+	BaseBranch        string
 	Others            []EvalOther
 }
 

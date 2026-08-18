@@ -75,6 +75,7 @@ type tokenTotals struct {
 	homeDir     string
 	parent      string
 	claudeCmd   string
+	baseBranch  string
 	skipEval    bool // set when this row's task-group has an incomplete sibling and --force wasn't passed
 	eval        evalJSON
 	complete    int
@@ -208,6 +209,7 @@ func reviewRun(configArg string, evaluate, fresh, force bool) error {
 						totals.homeDir = homeDir
 						totals.parent = parent
 						totals.claudeCmd = command.Cmd
+						totals.baseBranch = scanCfg.DefaultBase
 						if command.EvaluateWith != "" {
 							evalCmd, err := scanCfg.ResolveCommand(command.EvaluateWith)
 							if err != nil {
@@ -356,6 +358,7 @@ func runGroupedEvaluations(rows []tokenTotals) {
 				TargetDir:         target.dir,
 				TargetLabel:       target.label,
 				TargetProjectsDir: claudeProjectsDir(target.homeDir, target.dir),
+				BaseBranch:        target.baseBranch,
 				Others:            evalOthers,
 			})
 			if err != nil {
