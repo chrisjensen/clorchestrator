@@ -55,7 +55,9 @@ fi
 
 # --- Fresh setup path ---
 cd "$REPO_ROOT"
-git fetch origin "$BRANCH"
+if git ls-remote --exit-code origin "$BRANCH" > /dev/null 2>&1; then
+  git fetch origin "$BRANCH"
+fi
 
 # Drop stale worktree registrations so a worktree dir that was deleted without
 # `git worktree remove` doesn't block re-adding it here.
