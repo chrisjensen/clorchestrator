@@ -63,6 +63,7 @@ Minimal fix only — do not refactor surrounding code.
 - `## <handle>` — the task name; used for the screen session, worktree subdirectory, and temp config filename
 - Issue reference — extracted by regex from anywhere in the block. Accepts `#NNN`, `org/repo#NNN`, or a full `https://github.com/org/repo/issues/NNN` URL
 - `base: <branch>` — optional; overrides the default base branch for this task only
+- `command: <label>` — optional; selects a `[[command]]` from the config by label (e.g. `command: kclaude`) to launch this task with, instead of the config's default command
 - Everything else — passed as extra context to the planning prompt
 
 Run any `.md` file through clorchestrate:

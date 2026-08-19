@@ -35,6 +35,7 @@ type openOptions struct {
 	fresh          bool
 	noClaude       bool   // open the screen session in the worktree but don't launch claude
 	benchmarkLabel string // non-empty when opening one variant of a benchmark run
+	commandLabel   string // non-empty when a task selects a specific [[command]] via 'command:'
 }
 
 func NewOpenCmd() *cobra.Command {
@@ -270,6 +271,12 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 	claudeCmd := cfg.DefaultClaudeCmd()
 	if opts.benchmarkLabel != "" {
 		labelCmd, err := cfg.CommandByLabel(opts.benchmarkLabel)
+		if err != nil {
+			return err
+		}
+		claudeCmd = labelCmd
+	} else if opts.commandLabel != "" {
+		labelCmd, err := cfg.CommandByLabel(opts.commandLabel)
 		if err != nil {
 			return err
 		}
