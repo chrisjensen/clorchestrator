@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 
 func NewReviewCmd() *cobra.Command {
 	var evaluate, fresh, force bool
+	var groups []string
 	cmd := &cobra.Command{
 		Use:   "review [config]",
 		Short: "evaluate and compare benchmark implementations across command variants",
@@ -39,6 +41,11 @@ than restarts. Evaluation columns are appended to the TSV output.
 With --fresh, cached result files and any running evaluation screen sessions
 are deleted before starting, forcing a full re-evaluation.
 
+With --groups, only worktrees belonging to the given task groups (comma-
+separated task keys — a worktree's name with its trailing -<label> suffix
+stripped) are included, in both plain and --evaluate output. Use the
+"groups" command to list available task keys.
+
 A task's variants are only evaluated once every benchmark label configured
 for its worktree has finished (has a .clorchestrate-done marker in an
 existing sibling worktree) — otherwise the group is skipped with a warning
@@ -52,12 +59,13 @@ still running.`,
 			if len(args) > 0 {
 				configArg = args[0]
 			}
-			return reviewRun(configArg, evaluate, fresh, force)
+			return reviewRun(configArg, evaluate, fresh, force, groups)
 		},
 	}
 	cmd.Flags().BoolVar(&evaluate, "evaluate", false, "launch evaluation agents per worktree and add quality columns to TSV")
 	cmd.Flags().BoolVar(&fresh, "fresh", false, "delete cached evaluation results and re-run (implies --evaluate)")
 	cmd.Flags().BoolVar(&force, "force", false, "evaluate a task's variants even if some haven't finished (missing .clorchestrate-done)")
+	cmd.Flags().StringSliceVar(&groups, "groups", nil, "only include these task groups (comma-separated task keys — see the \"groups\" command)")
 	return cmd
 }
 
@@ -93,31 +101,49 @@ type evalJSON struct {
 	Missing     string `json:"missing"`
 }
 
-func reviewRun(configArg string, evaluate, fresh, force bool) error {
-	if fresh {
-		evaluate = true
-	}
-	var configPaths []string
+// taskKeyOf returns the task key for a worktree given its command label —
+// the worktree base name with its trailing "-<label>" suffix stripped.
+// Sibling worktrees for the same task (different command labels) share a
+// task key.
+func taskKeyOf(worktree, label string) string {
+	return strings.TrimSuffix(worktree, "-"+label)
+}
+
+// resolveConfigPaths returns the config file(s) to scan: just configArg if
+// given (resolved via resolveConfigPath), otherwise every *.toml file in
+// ~/.clorchestrate/.
+func resolveConfigPaths(configArg string) ([]string, error) {
 	if configArg != "" {
 		p, err := resolveConfigPath(configArg)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		configPaths = []string{p}
-	} else {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return err
+		return []string{p}, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(home, ".clorchestrate"))
+	if err != nil {
+		return nil, fmt.Errorf("read ~/.clorchestrate: %w", err)
+	}
+	var configPaths []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".toml") {
+			configPaths = append(configPaths, filepath.Join(home, ".clorchestrate", e.Name()))
 		}
-		entries, err := os.ReadDir(filepath.Join(home, ".clorchestrate"))
-		if err != nil {
-			return fmt.Errorf("read ~/.clorchestrate: %w", err)
-		}
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".toml") {
-				configPaths = append(configPaths, filepath.Join(home, ".clorchestrate", e.Name()))
-			}
-		}
+	}
+	return configPaths, nil
+}
+
+func reviewRun(configArg string, evaluate, fresh, force bool, groups []string) error {
+	if fresh {
+		evaluate = true
+	}
+	configPaths, err := resolveConfigPaths(configArg)
+	if err != nil {
+		return err
 	}
 
 	// homeCache avoids repeated SSH round-trips for the same server.
@@ -192,6 +218,9 @@ func reviewRun(configArg string, evaluate, fresh, force bool) error {
 					}
 					// Only evaluate worktrees where the session ran to completion.
 					if !remoteFileExists(scanCfg.Server, filepath.Join(worktreeDir, ".clorchestrate-done")) {
+						continue
+					}
+					if len(groups) > 0 && !slices.Contains(groups, taskKeyOf(filepath.Base(worktreeDir), command.Label)) {
 						continue
 					}
 					seen[worktreeDir] = true
@@ -281,7 +310,7 @@ func reviewRun(configArg string, evaluate, fresh, force bool) error {
 func markIncompleteGroups(rows []tokenTotals, scanCfg *config.Config, force bool) {
 	checked := map[string]bool{}
 	for i := range rows {
-		taskKey := strings.TrimSuffix(rows[i].worktree, "-"+rows[i].label)
+		taskKey := taskKeyOf(rows[i].worktree, rows[i].label)
 		if checked[taskKey] {
 			continue
 		}
@@ -311,7 +340,7 @@ func markIncompleteGroups(rows []tokenTotals, scanCfg *config.Config, force bool
 
 		fmt.Fprintf(os.Stderr, "skipping group %s: siblings not done yet: %v\n", taskKey, missing)
 		for j := range rows {
-			if strings.TrimSuffix(rows[j].worktree, "-"+rows[j].label) == taskKey {
+			if taskKeyOf(rows[j].worktree, rows[j].label) == taskKey {
 				rows[j].skipEval = true
 			}
 		}
@@ -327,7 +356,7 @@ func runGroupedEvaluations(rows []tokenTotals) {
 		if r.skipEval {
 			continue
 		}
-		taskKey := strings.TrimSuffix(r.worktree, "-"+r.label)
+		taskKey := taskKeyOf(r.worktree, r.label)
 		groups[taskKey] = append(groups[taskKey], i)
 	}
 
@@ -515,6 +544,12 @@ func runEvaluation(server, parent, worktreeBase, claudeCmd string) (string, erro
 // attemptEvaluation runs a single evaluation attempt using a detached screen session
 // (remote) or backgrounded nohup process (local), writing output to a result file.
 // On re-run it reuses a cached result file or reconnects to an in-progress session.
+//
+// --safe-mode disables CLAUDE.md, hooks, and other customizations for this
+// invocation: the eval agent otherwise inherits the operator's own global
+// CLAUDE.md (e.g. "run quality checks and commit before finishing"), which is
+// instructions for an implementer, not a reviewer, and was causing eval
+// agents to hedge or refuse instead of emitting the required JSON output.
 func attemptEvaluation(server, parent, worktreeBase, claudeCmd string) (string, error) {
 	promptPath := fmt.Sprintf("/tmp/clorchestrate-eval-%s.md", worktreeBase)
 	resultFile := evalResultFile(worktreeBase)
@@ -536,14 +571,14 @@ func attemptEvaluation(server, parent, worktreeBase, claudeCmd string) (string, 
 		if server == "" {
 			// nohup backgrounds the process so it survives terminal close / suspend.
 			shellCmd := fmt.Sprintf(
-				"nohup sh -c 'cd %s && %s --print \"$(cat %s)\" > %s 2>&1' >/dev/null 2>&1 &",
+				"nohup sh -c 'cd %s && %s --safe-mode --print \"$(cat %s)\" > %s 2>&1' >/dev/null 2>&1 &",
 				parent, claudeCmd, promptPath, resultFile,
 			)
 			cmd = exec.Command("sh", "-c", shellCmd)
 		} else {
 			// screen -dm starts detached; bash -lc sources the login profile for PATH.
 			screenCmd := fmt.Sprintf(
-				"screen -dmS %s bash -lc 'cd %s && %s --print \"$(cat %s)\" > %s 2>&1'",
+				"screen -dmS %s bash -lc 'cd %s && %s --safe-mode --print \"$(cat %s)\" > %s 2>&1'",
 				screenName, parent, claudeCmd, promptPath, resultFile,
 			)
 			cmd = exec.Command("ssh", server, screenCmd)
@@ -761,13 +796,14 @@ type usageLine struct {
 	} `json:"message"`
 }
 
-// readWorktreeTokens reads the most recent Claude Code JSONL transcript for a
-// worktree and sums its token usage. Sessions counts all JSONL files present
-// so the caller can see how many attempts existed.
+// readWorktreeTokens reads every Claude Code JSONL transcript for a worktree
+// and sums their token usage. Evaluation runs in the parent dir rather than
+// the worktree itself, so every session found here belongs to the
+// implementation. Sessions counts all JSONL files present so the caller can
+// see how many attempts existed.
 func readWorktreeTokens(server, homeDir, worktreeDir string) (tokenTotals, error) {
 	projectDir := claudeProjectsDir(homeDir, worktreeDir)
-	// Sort by modification time (newest first) and read only the latest session.
-	shellCmd := fmt.Sprintf("ls -t %s/*.jsonl 2>/dev/null | head -1 | xargs -r cat", projectDir)
+	shellCmd := fmt.Sprintf("cat %s/*.jsonl 2>/dev/null", projectDir)
 
 	var out []byte
 	var err error
