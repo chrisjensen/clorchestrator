@@ -22,7 +22,7 @@ remote_repo = "~/src/myproject-api"
 issue_repo = "org/myproject-api"
 branch_repo = "org/myproject-api"
 post_setup_cmd = "go mod download"
-# start_cmd: runs in a persistent screen session (one per flock run, not per branch).
+# start_cmd: runs in a persistent screen session (one per batch run, not per branch).
 start_cmd = "go run ./cmd/server"
 
 [[service]]

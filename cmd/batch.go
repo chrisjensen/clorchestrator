@@ -14,12 +14,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func NewFlockCmd() *cobra.Command {
+func NewBatchCmd() *cobra.Command {
 	var forceBranch, fresh bool
 	var benchmark string
 	cmd := &cobra.Command{
-		Use:   "flock <config> <tasks.md>",
-		Short: "launch all sessions from a task file",
+		Use:     "batch <config> <tasks.md>",
+		Aliases: []string{"flock"},
+		Short:   "launch all sessions from a task file",
 		Long: `Iterate a markdown task file and open one iTerm2 tab per task.
 
 Runs 'gh issue develop' per task and opens one iTerm2 tab per task with a
@@ -42,15 +43,22 @@ Task file format:
                                  Selects a [[package]] from the config;
                                  the package's fields override the global
                                  config for this task. Run
-                                 'flock <config> --help' to list packages
+                                 'batch <config> --help' to list packages
                                  defined in a given config.
+
+  command: <label>               Optional. Selects a [[command]] from the
+                                 config by label (e.g. 'command: kclaude')
+                                 to launch this task with instead of the
+                                 config's default command. Ignored for
+                                 tasks opened via --benchmark, which
+                                 already selects a command per label.
 
   <anything else>                Freeform context appended to the Claude
                                  prompt for this task.`,
 		Args:              cobra.ExactArgs(2),
 		ValidArgsFunction: completeConfigPaths,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return flockRun(args[0], args[1], forceBranch, fresh, benchmark)
+			return batchRun(args[0], args[1], forceBranch, fresh, benchmark)
 		},
 	}
 	cmd.Flags().BoolVar(&forceBranch, "force-branch", false, "always create a new branch (fail if one already exists)")
@@ -102,7 +110,7 @@ func appendPackageHelp(c *cobra.Command, args []string) {
 	}
 }
 
-func flockRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark string) error {
+func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark string) error {
 	configPath, err := resolveConfigPath(configPath)
 	if err != nil {
 		return err
@@ -286,6 +294,15 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 			fmt.Fprintf(os.Stderr, "  Branch is %d commit(s) ahead of %s — opening shell in worktree (no Claude)\n", ahead, base)
 		}
 
+		var commandLabel string
+		if t.Command != "" {
+			resolved, err := effectiveCfg.ResolveCommand(t.Command)
+			if err != nil {
+				return fmt.Errorf("task %s: command %q: %w", t.Handle, t.Command, err)
+			}
+			commandLabel = resolved.Label
+		}
+
 		opts := openOptions{
 			issue:        t.IssueNum,
 			extraContext: t.ExtraContext,
@@ -293,6 +310,7 @@ func flockRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 			openTab:      true,
 			fresh:        fresh,
 			noClaude:     ahead > 0,
+			commandLabel: commandLabel,
 		}
 		if err := openRun(configPath, t.Handle, branch, opts); err != nil {
 			return fmt.Errorf("open for %s: %w", t.Handle, err)
