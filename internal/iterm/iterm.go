@@ -10,6 +10,7 @@ import (
 
 type TabOptions struct {
 	TabColorHex string // "#RRGGBB" or "RRGGBB", may be empty
+	TabTitle    string // optional; sets the tab/session name, overriding iTerm2's automatic naming
 	RemoteCmd   string // the shell command the new tab will run
 	FollowupCmd string // optional; typed once a shell prompt is detected after RemoteCmd
 }
@@ -45,6 +46,12 @@ func BuildAppleScript(opts TabOptions) string {
 			colorCmd = esc + "; "
 		}
 	}
+	titleCmd := ""
+	if opts.TabTitle != "" {
+		titleCmd = fmt.Sprintf(`      set name to "%s"
+`, appleScriptEscape(opts.TabTitle))
+	}
+
 	firstLine := fmt.Sprintf(`      write text "%s"`, appleScriptEscape(colorCmd+opts.RemoteCmd))
 
 	extra := ""
@@ -88,10 +95,10 @@ func BuildAppleScript(opts TabOptions) string {
   tell current window
     create tab with default profile
     tell current session of current tab
-%s%s
+%s%s%s
     end tell
   end tell
-end tell`, firstLine, extra)
+end tell`, titleCmd, firstLine, extra)
 }
 
 // tabColorEscape returns a `printf '\033]...'` command that sets the iTerm2

@@ -174,6 +174,7 @@ func reconnectRun(args []string, force bool) error {
 				}
 				if err := iterm.OpenTab(iterm.TabOptions{
 					TabColorHex: matched.tabColor,
+					TabTitle:    sess.name,
 					RemoteCmd:   reconnectCmd,
 				}); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: could not open tab for session %s: %v\n", sess.name, err)
@@ -382,6 +383,7 @@ func reconnectRestart(args []string) error {
 				fmt.Fprintf(os.Stderr, "starting session %q for %s\n", base, dir)
 				if err := iterm.OpenTab(iterm.TabOptions{
 					TabColorHex: t.tabColor,
+					TabTitle:    base,
 					RemoteCmd:   remoteCmd,
 					FollowupCmd: "headclaude --continue",
 				}); err != nil {
