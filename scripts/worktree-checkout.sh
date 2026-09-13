@@ -59,11 +59,6 @@ if git ls-remote --exit-code origin "$BRANCH" > /dev/null 2>&1; then
   git fetch origin "$BRANCH"
 fi
 
-# Drop stale worktree registrations so a worktree dir that was deleted without
-# `git worktree remove` doesn't block re-adding it here.
-git -C "$REPO_ROOT" worktree prune
-
-echo "Checking out $BRANCH into $WORKTREE_DIR..."
 # Use bd worktree create only for stealth beads (untracked .beads dir).
 # If .beads is committed on the branch, plain git worktree add preserves it;
 # bd worktree create would overwrite it with a redirect to the main repo's DB.
@@ -72,30 +67,54 @@ if [[ -d "$REPO_ROOT/.beads" ]] && git -C "$REPO_ROOT" ls-files --error-unmatch 
   BEADS_COMMITTED=true
 fi
 
-if [[ -d "$REPO_ROOT/.beads" ]] && [[ "$BEADS_COMMITTED" == false ]]; then
-  # Stealth beads repo: use `bd worktree create` so the new worktree shares
-  # the main repo's .beads database via a redirect. bd attaches an existing
-  # local branch but does not create one tracking origin, so set that up first
-  # to preserve the resume-a-remote-branch behaviour of the plain-git path below.
-  if ! git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
-    if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
-      git -C "$REPO_ROOT" branch --track "$BRANCH" "origin/$BRANCH"
+# Other worktrees of this repo may have concurrently-running Claude sessions
+# that write to the shared .git/config (e.g. `git push -u`) at any time. That
+# can collide with the config writes below (git branch --track, git worktree
+# add ... origin/$BRANCH) and fail with "could not lock config file
+# .git/config: File exists". This is transient, so retry a few times.
+create_worktree() {
+  # Drop stale worktree registrations so a worktree dir that was deleted
+  # without `git worktree remove` doesn't block re-adding it here.
+  git -C "$REPO_ROOT" worktree prune
+
+  echo "Checking out $BRANCH into $WORKTREE_DIR..."
+  if [[ -d "$REPO_ROOT/.beads" ]] && [[ "$BEADS_COMMITTED" == false ]]; then
+    # Stealth beads repo: use `bd worktree create` so the new worktree shares
+    # the main repo's .beads database via a redirect. bd attaches an existing
+    # local branch but does not create one tracking origin, so set that up first
+    # to preserve the resume-a-remote-branch behaviour of the plain-git path below.
+    if ! git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+      if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+        git -C "$REPO_ROOT" branch --track "$BRANCH" "origin/$BRANCH"
+      fi
+      # else: bd creates a new branch from the current HEAD
     fi
-    # else: bd creates a new branch from the current HEAD
+    # bd lives on the login-shell PATH (like npm/claude), not the bare PATH this
+    # script gets over non-tty SSH — run it via `bash -lc` so it resolves.
+    ( cd "$REPO_ROOT" && WT="$WORKTREE_DIR" BR="$BRANCH" \
+        bash -lc 'bd worktree create "$WT" --branch="$BR"' )
+  elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    # Local branch already exists (e.g. a prior run created it) — attach it
+    # rather than trying to recreate it, which would fail.
+    git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH"
+  elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+    git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" "origin/$BRANCH"
+  else
+    git -C "$REPO_ROOT" worktree add -b "$BRANCH" "$WORKTREE_DIR"
   fi
-  # bd lives on the login-shell PATH (like npm/claude), not the bare PATH this
-  # script gets over non-tty SSH — run it via `bash -lc` so it resolves.
-  ( cd "$REPO_ROOT" && WT="$WORKTREE_DIR" BR="$BRANCH" \
-      bash -lc 'bd worktree create "$WT" --branch="$BR"' )
-elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
-  # Local branch already exists (e.g. a prior run created it) — attach it
-  # rather than trying to recreate it, which would fail.
-  git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH"
-elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
-  git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" "origin/$BRANCH"
-else
-  git -C "$REPO_ROOT" worktree add -b "$BRANCH" "$WORKTREE_DIR"
-fi
+}
+
+MAX_ATTEMPTS=3
+attempt=1
+until create_worktree; do
+  if [[ $attempt -ge $MAX_ATTEMPTS ]]; then
+    echo "error: worktree setup failed after $MAX_ATTEMPTS attempts" >&2
+    exit 1
+  fi
+  echo "worktree setup failed (attempt $attempt/$MAX_ATTEMPTS) — retrying in 5s..." >&2
+  sleep 5
+  attempt=$((attempt + 1))
+done
 
 SERENA_SRC="$(git -C "$REPO_ROOT" worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
 if [[ -d "$SERENA_SRC/.serena" ]]; then
