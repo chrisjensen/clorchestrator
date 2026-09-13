@@ -27,6 +27,11 @@ var (
 	issueURLRE       = regexp.MustCompile(`https?://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)`)
 	issueShorthandRE = regexp.MustCompile(`[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#(\d+)`)
 	issueBareRE      = regexp.MustCompile(`#(\d+)`)
+
+	// Match lines that consist solely of an issue reference, so they can be
+	// excluded from ExtraContext (the reference is already surfaced via
+	// IssueNum/IssueURL elsewhere in the prompt).
+	issueOnlyLineRE = regexp.MustCompile(`^(?:https?://github\.com/[^/\s]+/[^/\s]+/issues/\d+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+|#\d+)$`)
 )
 
 func Parse(path string) ([]Task, error) {
@@ -85,6 +90,9 @@ func buildTask(handle, body string) Task {
 		}
 		if m := commandRE.FindStringSubmatch(trimmed); m != nil {
 			command = m[1]
+			continue
+		}
+		if issueOnlyLineRE.MatchString(trimmed) {
 			continue
 		}
 		contextLines = append(contextLines, line)
