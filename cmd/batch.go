@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/chrisjensen/clorchestrate/internal/branchdetect"
 	"github.com/chrisjensen/clorchestrate/internal/config"
 	"github.com/chrisjensen/clorchestrate/internal/github"
 	"github.com/chrisjensen/clorchestrate/internal/iterm"
@@ -145,6 +146,8 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 		benchmarkLabels[i] = resolved.Label
 	}
 
+	resolver := branchdetect.NewResolver()
+
 	for _, t := range tasks {
 		if len(cfg.Packages) > 0 && t.Package == "" {
 			fmt.Fprintf(os.Stderr, "error: task %q has no 'package:' but config defines packages — skipping\n", t.Handle)
@@ -159,6 +162,13 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 		base := t.BaseBranch
 		if base == "" {
 			base = effectiveCfg.DefaultBase
+		}
+		if base == "" {
+			resolved, err := resolver.Resolve(effectiveCfg.Server, effectiveCfg.RemoteRepo, effectiveCfg.BranchRepo, effectiveCfg.IssueRepo)
+			if err != nil {
+				return fmt.Errorf("task %s: resolve default branch: %w", t.Handle, err)
+			}
+			base = resolved
 		}
 
 		if len(benchmarkLabels) > 0 {

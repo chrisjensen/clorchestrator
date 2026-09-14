@@ -46,6 +46,20 @@ func DevelopBranch(a DevelopArgs) (string, error) {
 	return branch, nil
 }
 
+// DefaultBranch returns the repo's default branch (e.g. "main", "master") as
+// reported by GitHub.
+func DefaultBranch(repo string) (string, error) {
+	out, err := runFunc("gh", "repo", "view", repo, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name")
+	if err != nil {
+		return "", fmt.Errorf("gh repo view %s: %w: %s", repo, err, string(out))
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "", fmt.Errorf("gh repo view %s: empty default branch", repo)
+	}
+	return branch, nil
+}
+
 // FormatBranchName substitutes {issue} and {handle} tokens.
 func FormatBranchName(format, issue, handle string) string {
 	s := strings.ReplaceAll(format, "{issue}", issue)

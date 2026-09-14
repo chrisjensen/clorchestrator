@@ -122,8 +122,8 @@ server = "myserver"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.DefaultBase != "main" {
-		t.Errorf("DefaultBase = %q, want main", cfg.DefaultBase)
+	if cfg.DefaultBase != "" {
+		t.Errorf("DefaultBase = %q, want empty (auto-detected when unset)", cfg.DefaultBase)
 	}
 	if cfg.Server != "myserver" {
 		t.Errorf("Server = %q", cfg.Server)

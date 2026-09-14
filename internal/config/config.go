@@ -243,7 +243,7 @@ func configDirStems() []string {
 }
 
 func Parse(path string) (*Config, error) {
-	cfg := &Config{DefaultBase: "main"}
+	cfg := &Config{}
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chrisjensen/clorchestrate/internal/branchdetect"
 	"github.com/chrisjensen/clorchestrate/internal/config"
 	"github.com/chrisjensen/clorchestrate/prompts"
 	"github.com/spf13/cobra"
@@ -160,6 +161,8 @@ func reviewRun(configArg string, evaluate, fresh, force bool, groups []string) e
 		return h, nil
 	}
 
+	resolver := branchdetect.NewResolver()
+
 	var rows []tokenTotals
 	for _, cfgPath := range configPaths {
 		cfg, err := config.Parse(cfgPath)
@@ -239,6 +242,14 @@ func reviewRun(configArg string, evaluate, fresh, force bool, groups []string) e
 						totals.parent = parent
 						totals.claudeCmd = command.Cmd
 						totals.baseBranch = scanCfg.DefaultBase
+						if totals.baseBranch == "" {
+							resolved, err := resolver.Resolve(scanCfg.Server, scanCfg.RemoteRepo, scanCfg.BranchRepo, scanCfg.IssueRepo)
+							if err != nil {
+								fmt.Fprintf(os.Stderr, "warning: resolve default branch for %s: %v\n", worktreeDir, err)
+							} else {
+								totals.baseBranch = resolved
+							}
+						}
 						if command.EvaluateWith != "" {
 							evalCmd, err := scanCfg.ResolveCommand(command.EvaluateWith)
 							if err != nil {
