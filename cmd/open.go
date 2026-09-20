@@ -38,8 +38,9 @@ type openOptions struct {
 	commandLabel   string // non-empty when a task selects a specific [[command]] via 'command:'
 
 	// Hive coordination (multi-session benchmark runs). role is set for hive
-	// sessions. Workers run in <runDir>/<benchmarkLabel> and are prompted with
-	// /hive-worker; the coordinator runs in runDir itself and is prompted with
+	// sessions. Workers run in <runDir>/<benchmarkLabel>, prompted with their
+	// task body plus an instruction to use the hive-worker skill; the
+	// coordinator runs in runDir itself and is prompted with
 	// /hive-coordinate <coordinatorBase>. See the hive-worker / hive-coordinate
 	// skills.
 	hiveRole        hiveRole
@@ -286,8 +287,10 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		}
 		if !opts.noClaude {
 			// The task body (issue ref / description + planning context) is what a
-			// session works from. In hive mode it lives in <runDir>/task.md (read by
-			// the hive-worker skill); otherwise it is the initial Claude prompt.
+			// session works from. It is always the initial Claude prompt (for a hive
+			// worker, with a trailing instruction to use the hive-worker skill); it's
+			// also mirrored to <runDir>/task.md in hive mode, since the coordinator
+			// reads it too during its merge/review steps.
 			var taskBody string
 			if mode == ModeFullTask {
 				p, err := prompts.Prompt(prompts.PromptData{
@@ -313,20 +316,23 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 			}
 
 			if opts.hiveRole != "" {
-				// Coordination happens through files in the run dir; the launch prompt
-				// is just the skill invocation. task.md carries the task itself.
-				// Only workers write it: they run first and (for issue tasks) render
-				// the full issue prompt, whereas the coordinator has no issue and would
-				// otherwise clobber the run dir's task.md with an empty body.
+				// Coordination happens through files in the run dir. A worker's launch
+				// prompt is its task body (so the chat history shows what it was asked
+				// to do) plus an instruction to work it via the hive-worker skill; the
+				// coordinator has no task body, only /hive-coordinate <base>.
+				//
+				// Only workers write task.md: they run first and (for issue tasks)
+				// render the full issue prompt, whereas the coordinator has no issue
+				// and would otherwise clobber the run dir's task.md with an empty body.
+				// The coordinator still reads task.md itself during its merge/review
+				// steps, so it must stay authoritative there regardless of what's in
+				// a worker's own chat history.
 				if taskBody != "" && opts.hiveRole == hiveRoleWorker {
 					if err := writeTaskMD(cfg.Server, slug, taskBody); err != nil {
 						return err
 					}
 				}
-				launchPrompt := "/hive-worker"
-				if opts.hiveRole == hiveRoleCoordinator {
-					launchPrompt = "/hive-coordinate " + opts.coordinatorBase
-				}
+				launchPrompt := hiveLaunchPrompt(opts.hiveRole, taskBody, opts.coordinatorBase)
 				if err := writePromptFile(cfg.Server, slug, launchPrompt); err != nil {
 					return err
 				}
@@ -469,8 +475,24 @@ func writePromptFile(server, handle, prompt string) error {
 	return writeRemoteFile(server, fmt.Sprintf("/tmp/task-%s.prompt.md", handle), prompt, "prompt file")
 }
 
+// hiveLaunchPrompt builds a hive session's initial Claude prompt. A worker's
+// prompt is its task body (so the chat history shows what it was asked to do)
+// plus an instruction to work it via the hive-worker skill; the coordinator
+// has no task body, only /hive-coordinate <coordinatorBase>.
+func hiveLaunchPrompt(role hiveRole, taskBody, coordinatorBase string) string {
+	if role == hiveRoleCoordinator {
+		return "/hive-coordinate " + coordinatorBase
+	}
+	prompt := "Use the hive-worker skill to implement this task."
+	if taskBody != "" {
+		prompt = taskBody + "\n\n" + prompt
+	}
+	return prompt
+}
+
 // writeTaskMD stages the hive task.md body; the checkout script copies it into
-// the run dir as task.md (read by the hive-worker skill).
+// the run dir as task.md (read by the hive-coordinate skill during its
+// merge/review steps).
 func writeTaskMD(server, handle, body string) error {
 	return writeRemoteFile(server, fmt.Sprintf("/tmp/task-%s.md", handle), body, "task.md")
 }

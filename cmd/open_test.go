@@ -162,6 +162,18 @@ func TestBuildFollowupCmd(t *testing.T) {
 	}
 }
 
+func TestHiveLaunchPrompt(t *testing.T) {
+	if got := hiveLaunchPrompt(hiveRoleWorker, "Implement issue #42.", ""); got != "Implement issue #42.\n\nUse the hive-worker skill to implement this task." {
+		t.Errorf("worker with task body: got %q", got)
+	}
+	if got := hiveLaunchPrompt(hiveRoleWorker, "", ""); got != "Use the hive-worker skill to implement this task." {
+		t.Errorf("worker with no task body: got %q", got)
+	}
+	if got := hiveLaunchPrompt(hiveRoleCoordinator, "Implement issue #42.", "main"); got != "/hive-coordinate main" {
+		t.Errorf("coordinator: got %q", got)
+	}
+}
+
 func TestWorktreePath(t *testing.T) {
 	// Mirrors scripts/worktree-checkout.sh: $(dirname REMOTE_REPO)/<prefix>-<sanitized-branch>
 	// prefix defaults to repo basename when empty.
