@@ -13,15 +13,18 @@ type Task struct {
 	IssueNum     string
 	BaseBranch   string
 	Package      string
-	Command      string
+	Commands     []string
 	ExtraContext string
 }
 
 var (
-	headingRE  = regexp.MustCompile(`^##\s*(\S.*)$`)
-	baseRE     = regexp.MustCompile(`(?i)^base:\s*(.+)$`)
-	packageRE  = regexp.MustCompile(`(?i)^package:\s*(\S+)$`)
-	commandRE  = regexp.MustCompile(`(?i)^command:\s*(\S+)$`)
+	headingRE = regexp.MustCompile(`^##\s*(\S.*)$`)
+	baseRE    = regexp.MustCompile(`(?i)^base:\s*(.+)$`)
+	packageRE = regexp.MustCompile(`(?i)^package:\s*(\S+)$`)
+	// command: accepts a single label or a comma-separated list (e.g.
+	// "command: zai,claude"), which fans the task out into one worker session
+	// per label plus a coordinator (see batch benchmark/hive mode).
+	commandRE = regexp.MustCompile(`(?i)^command:\s*(\S.*)$`)
 	// Matches: URL form, org/repo#NNN shorthand, or bare #NNN.
 	// We take the last number found in the match.
 	issueURLRE       = regexp.MustCompile(`https?://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)`)
@@ -76,7 +79,8 @@ func Parse(path string) ([]Task, error) {
 func buildTask(handle, body string) Task {
 	issueNum := ExtractIssueNum(body)
 
-	var base, pkg, command string
+	var base, pkg string
+	var commands []string
 	var contextLines []string
 	for _, line := range strings.Split(body, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -89,7 +93,7 @@ func buildTask(handle, body string) Task {
 			continue
 		}
 		if m := commandRE.FindStringSubmatch(trimmed); m != nil {
-			command = m[1]
+			commands = SplitCSV(m[1])
 			continue
 		}
 		if issueOnlyLineRE.MatchString(trimmed) {
@@ -104,9 +108,23 @@ func buildTask(handle, body string) Task {
 		IssueNum:     issueNum,
 		BaseBranch:   base,
 		Package:      pkg,
-		Command:      command,
+		Commands:     commands,
 		ExtraContext: extra,
 	}
+}
+
+// SplitCSV splits a comma-separated value into trimmed, non-empty items,
+// preserving order. Returns nil when nothing remains. Shared by the taskfile
+// command: parser and the batch --benchmark flag.
+func SplitCSV(s string) []string {
+	var out []string
+	for _, c := range strings.Split(s, ",") {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // ExtractIssueNum returns the issue number from a body that may contain a GitHub

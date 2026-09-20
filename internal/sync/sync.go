@@ -33,6 +33,15 @@ var DefaultRunner Runner = execRunner{}
 type Script struct {
 	Name    string // basename on the server, e.g. "start-task.sh"
 	Content []byte // local script bytes (from //go:embed)
+	Dir     string // target dir on the server; defaults to "~/bin" when empty
+}
+
+// dir returns the target directory for the script, defaulting to ~/bin.
+func (s Script) dir() string {
+	if s.Dir != "" {
+		return s.Dir
+	}
+	return "~/bin"
 }
 
 // SyncScripts ensures each script in ~/bin/ on the server matches the
@@ -47,7 +56,7 @@ func SyncScripts(server string, scripts []Script, r Runner, log func(format stri
 		log = func(string, ...any) {}
 	}
 	for _, s := range scripts {
-		remotePath := "~/bin/" + s.Name
+		remotePath := s.dir() + "/" + s.Name
 		wantHash := sha256Hex(s.Content)
 		gotHash, err := remoteHash(r, server, remotePath)
 		if err != nil {
@@ -62,7 +71,7 @@ func SyncScripts(server string, scripts []Script, r Runner, log func(format stri
 			continue
 		}
 		log("Syncing %s to %s (current: %s, want: %s)\n", s.Name, target, shortHash(gotHash), shortHash(wantHash))
-		if err := ensureRemoteBinDir(r, server); err != nil {
+		if err := ensureRemoteDir(r, server, s.dir()); err != nil {
 			return err
 		}
 		if err := uploadScript(r, server, s, remotePath); err != nil {
@@ -106,17 +115,13 @@ func remoteHash(r Runner, server, remotePath string) (string, error) {
 	return "", nil
 }
 
-func ensureRemoteBinDir(r Runner, server string) error {
+func ensureRemoteDir(r Runner, server, dir string) error {
 	if server == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("resolve home dir: %w", err)
-		}
-		return os.MkdirAll(filepath.Join(home, "bin"), 0755)
+		return os.MkdirAll(expandHome(dir), 0755)
 	}
-	out, err := r.Run("ssh", []string{server, "mkdir -p ~/bin"}, nil)
+	out, err := r.Run("ssh", []string{server, fmt.Sprintf("mkdir -p %s", dir)}, nil)
 	if err != nil {
-		return fmt.Errorf("mkdir ~/bin on %s: %w: %s", server, err, string(out))
+		return fmt.Errorf("mkdir %s on %s: %w: %s", dir, server, err, string(out))
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -47,12 +48,17 @@ Task file format:
                                  'batch <config> --help' to list packages
                                  defined in a given config.
 
-  command: <label>               Optional. Selects a [[command]] from the
+  command: <label>[,<label>...]  Optional. Selects a [[command]] from the
                                  config by label (e.g. 'command: kclaude')
                                  to launch this task with instead of the
-                                 config's default command. Ignored for
-                                 tasks opened via --benchmark, which
-                                 already selects a command per label.
+                                 config's default command. A comma-separated
+                                 list of two or more labels (e.g.
+                                 'command: zai,claude') opens one worker
+                                 session per label plus a coordinator (the
+                                 first label's command) — same as passing
+                                 those labels to --benchmark. Ignored when
+                                 --benchmark is given, which already selects
+                                 a command per label.
 
   <anything else>                Freeform context appended to the Claude
                                  prompt for this task.`,
@@ -135,7 +141,7 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 		return err
 	}
 
-	benchmarkLabels := parseBenchmarkLabels(benchmark)
+	benchmarkLabels := taskfile.SplitCSV(benchmark)
 	// Resolve and validate all benchmark labels against the config before
 	// doing any branch creation or session setup.
 	for i, raw := range benchmarkLabels {
@@ -171,7 +177,23 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 			base = resolved
 		}
 
-		if len(benchmarkLabels) > 0 {
+		// Determine the label set for this task. --benchmark applies to every task;
+		// a comma-separated per-task 'command:' list is the other trigger.
+		labels := benchmarkLabels
+		if len(labels) == 0 && len(t.Commands) >= 2 {
+			for _, raw := range t.Commands {
+				resolved, err := effectiveCfg.ResolveCommand(raw)
+				if err != nil {
+					return fmt.Errorf("task %s: command %q: %w", t.Handle, raw, err)
+				}
+				labels = append(labels, resolved.Label)
+			}
+		}
+		// Hive coordination (worker worktrees under a shared run dir + a coordinator
+		// session) kicks in for any multi-label run.
+		hive := len(labels) >= 2
+
+		if len(labels) > 0 {
 			// Benchmark mode: one gh-linked branch per label, each suffixed with the label.
 			if t.IssueNum != "" {
 				closed, err := github.IsIssueClosed(t.IssueNum, effectiveCfg.IssueRepo)
@@ -186,8 +208,11 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 
 			// Compute the base branch name we'd use for the label suffix.
 			baseBranchName := benchmarkBaseBranch(effectiveCfg.BranchNameFormat, t.IssueNum, t.Handle)
+			// In hive mode the run dir is the per-task worktree path without a label
+			// suffix; each worker's worktree is a <runDir>/<label> subdir of it.
+			runDir := worktreePath(effectiveCfg.RemoteRepo, baseBranchName, effectiveCfg.WorktreePrefix)
 
-			for _, label := range benchmarkLabels {
+			for _, label := range labels {
 				labelBranch := baseBranchName + "-" + label
 
 				if t.IssueNum != "" {
@@ -223,6 +248,9 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 
 			openBenchmarkSession:
 				worktreeDir := worktreePath(effectiveCfg.RemoteRepo, labelBranch, effectiveCfg.WorktreePrefix)
+				if hive {
+					worktreeDir = filepath.Join(runDir, label)
+				}
 				ahead, err := branchAheadCount(effectiveCfg.Server, worktreeDir, base)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "  warning: could not check commits ahead for %s: %v — proceeding with planning session\n", labelBranch, err)
@@ -241,8 +269,30 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 					noClaude:       ahead > 0,
 					benchmarkLabel: label,
 				}
+				if hive {
+					opts.hiveRole = hiveRoleWorker
+					opts.runDir = runDir
+				}
 				if err := openRun(configPath, t.Handle, labelBranch, opts); err != nil {
 					return fmt.Errorf("open for %s/%s: %w", t.Handle, label, err)
+				}
+			}
+
+			// One coordinator session per hive run, launched after the workers so the
+			// run dir and task.md already exist. It runs the first label's command.
+			if hive {
+				coordOpts := openOptions{
+					extraContext:    t.ExtraContext,
+					pkg:             t.Package,
+					openTab:         true,
+					fresh:           fresh,
+					hiveRole:        hiveRoleCoordinator,
+					runDir:          runDir,
+					commandLabel:    labels[0],
+					coordinatorBase: base,
+				}
+				if err := openRun(configPath, t.Handle, "", coordOpts); err != nil {
+					return fmt.Errorf("open coordinator for %s: %w", t.Handle, err)
 				}
 			}
 			continue
@@ -304,11 +354,13 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 			fmt.Fprintf(os.Stderr, "  Branch is %d commit(s) ahead of %s — opening shell in worktree (no Claude)\n", ahead, base)
 		}
 
+		// A single 'command:' label picks the launcher; a multi-label list would
+		// have been handled by the hive path above and continued past here.
 		var commandLabel string
-		if t.Command != "" {
-			resolved, err := effectiveCfg.ResolveCommand(t.Command)
+		if len(t.Commands) == 1 {
+			resolved, err := effectiveCfg.ResolveCommand(t.Commands[0])
 			if err != nil {
-				return fmt.Errorf("task %s: command %q: %w", t.Handle, t.Command, err)
+				return fmt.Errorf("task %s: command %q: %w", t.Handle, t.Commands[0], err)
 			}
 			commandLabel = resolved.Label
 		}
@@ -327,22 +379,6 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 		}
 	}
 	return nil
-}
-
-// parseBenchmarkLabels splits a comma-separated label string into trimmed,
-// non-empty labels. Returns nil when the input is empty.
-func parseBenchmarkLabels(s string) []string {
-	if s == "" {
-		return nil
-	}
-	var labels []string
-	for _, l := range strings.Split(s, ",") {
-		l = strings.TrimSpace(l)
-		if l != "" {
-			labels = append(labels, l)
-		}
-	}
-	return labels
 }
 
 // benchmarkBaseBranch returns the base branch name used to derive per-label

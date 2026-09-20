@@ -102,29 +102,27 @@ func groupsRun(configArg string) error {
 			}
 
 			for _, command := range scanCfg.Commands {
-				pattern := filepath.Join(parent, prefix+"-*-"+command.Label)
-				matches, err := remoteGlob(scanCfg.Server, pattern)
+				worktrees, err := discoverWorktrees(scanCfg.Server, parent, prefix, command.Label)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "warning: glob %s: %v\n", pattern, err)
+					fmt.Fprintf(os.Stderr, "warning: glob for %s: %v\n", command.Label, err)
 					continue
 				}
 
-				for _, worktreeDir := range matches {
-					if seen[worktreeDir] {
+				for _, w := range worktrees {
+					if seen[w.dir] {
 						continue
 					}
-					seen[worktreeDir] = true
+					seen[w.dir] = true
 
-					worktree := filepath.Base(worktreeDir)
 					status := "running"
-					if remoteFileExists(scanCfg.Server, filepath.Join(worktreeDir, ".clorchestrate-done")) {
+					if worktreeDone(scanCfg.Server, w, command.Label) {
 						status = "done"
 					}
 					rows = append(rows, siblingStatus{
-						taskKey:  taskKeyOf(worktree, command.Label),
+						taskKey:  w.taskKey,
 						label:    command.Label,
 						status:   status,
-						worktree: worktree,
+						worktree: filepath.Base(w.dir),
 					})
 				}
 			}
