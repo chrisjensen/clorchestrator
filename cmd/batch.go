@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -189,9 +188,6 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 				labels = append(labels, resolved.Label)
 			}
 		}
-		// Hive coordination (worker worktrees under a shared run dir + a coordinator
-		// session) kicks in for any multi-label run.
-		hive := len(labels) >= 2
 
 		if len(labels) > 0 {
 			// Benchmark mode: one gh-linked branch per label, each suffixed with the label.
@@ -207,93 +203,53 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 			}
 
 			// Compute the base branch name we'd use for the label suffix.
-			baseBranchName := benchmarkBaseBranch(effectiveCfg.BranchNameFormat, t.IssueNum, t.Handle)
-			// In hive mode the run dir is the per-task worktree path without a label
-			// suffix; each worker's worktree is a <runDir>/<label> subdir of it.
-			runDir := worktreePath(effectiveCfg.RemoteRepo, baseBranchName, effectiveCfg.WorktreePrefix)
+			baseBranchName := deriveBranchBase(effectiveCfg.BranchNameFormat, t.IssueNum, t.Handle)
 
-			for _, label := range labels {
+			resolveBranch := func(label string) (string, error) {
 				labelBranch := baseBranchName + "-" + label
-
-				if t.IssueNum != "" {
-					// Check if this label's branch is already linked to the issue.
-					if !forceBranch {
-						existing, err := github.ListLinkedBranches(t.IssueNum, effectiveCfg.IssueRepo)
-						if err != nil {
-							return fmt.Errorf("task %s label %s: list branches: %w", t.Handle, label, err)
-						}
-						for _, b := range existing {
-							if b == labelBranch {
-								fmt.Fprintf(os.Stderr, "Reusing existing branch for %q/%s (#%s): %s\n", t.Handle, label, t.IssueNum, labelBranch)
-								goto openBenchmarkSession
-							}
-						}
-					}
-					fmt.Fprintf(os.Stderr, "Creating branch for %q/%s (#%s from %s)...\n", t.Handle, label, t.IssueNum, base)
-					labelBranch, err = github.DevelopBranch(github.DevelopArgs{
-						IssueNum:   t.IssueNum,
-						IssueRepo:  effectiveCfg.IssueRepo,
-						BranchRepo: effectiveCfg.BranchRepo,
-						Base:       base,
-						Handle:     t.Handle,
-						BranchName: labelBranch,
-					})
-					if err != nil {
-						return fmt.Errorf("task %s label %s: %w", t.Handle, label, err)
-					}
-					fmt.Fprintf(os.Stderr, "  Branch: %s\n", labelBranch)
-				} else {
+				if t.IssueNum == "" {
 					fmt.Fprintf(os.Stderr, "No-issue task %q/%s — branch: %s\n", t.Handle, label, labelBranch)
+					return labelBranch, nil
 				}
-
-			openBenchmarkSession:
-				worktreeDir := worktreePath(effectiveCfg.RemoteRepo, labelBranch, effectiveCfg.WorktreePrefix)
-				if hive {
-					worktreeDir = filepath.Join(runDir, label)
+				// Check if this label's branch is already linked to the issue.
+				if !forceBranch {
+					existing, err := github.ListLinkedBranches(t.IssueNum, effectiveCfg.IssueRepo)
+					if err != nil {
+						return "", fmt.Errorf("task %s label %s: list branches: %w", t.Handle, label, err)
+					}
+					for _, b := range existing {
+						if b == labelBranch {
+							fmt.Fprintf(os.Stderr, "Reusing existing branch for %q/%s (#%s): %s\n", t.Handle, label, t.IssueNum, labelBranch)
+							return labelBranch, nil
+						}
+					}
 				}
-				ahead, err := branchAheadCount(effectiveCfg.Server, worktreeDir, base)
+				fmt.Fprintf(os.Stderr, "Creating branch for %q/%s (#%s from %s)...\n", t.Handle, label, t.IssueNum, base)
+				created, err := github.DevelopBranch(github.DevelopArgs{
+					IssueNum:   t.IssueNum,
+					IssueRepo:  effectiveCfg.IssueRepo,
+					BranchRepo: effectiveCfg.BranchRepo,
+					Base:       base,
+					Handle:     t.Handle,
+					BranchName: labelBranch,
+				})
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "  warning: could not check commits ahead for %s: %v — proceeding with planning session\n", labelBranch, err)
-					ahead = 0
+					return "", fmt.Errorf("task %s label %s: %w", t.Handle, label, err)
 				}
-				if ahead > 0 {
-					fmt.Fprintf(os.Stderr, "  Branch is %d commit(s) ahead of %s — opening shell in worktree (no Claude)\n", ahead, base)
-				}
-
-				opts := openOptions{
-					issue:          t.IssueNum,
-					extraContext:   t.ExtraContext,
-					pkg:            t.Package,
-					openTab:        true,
-					fresh:          fresh,
-					noClaude:       ahead > 0,
-					benchmarkLabel: label,
-				}
-				if hive {
-					opts.hiveRole = hiveRoleWorker
-					opts.runDir = runDir
-				}
-				if err := openRun(configPath, t.Handle, labelBranch, opts); err != nil {
-					return fmt.Errorf("open for %s/%s: %w", t.Handle, label, err)
-				}
+				fmt.Fprintf(os.Stderr, "  Branch: %s\n", created)
+				return created, nil
 			}
 
-			// One coordinator session per hive run, launched after the workers so the
-			// run dir and task.md already exist. It runs the first label's command.
-			if hive {
-				coordOpts := openOptions{
-					extraContext:    t.ExtraContext,
-					pkg:             t.Package,
-					openTab:         true,
-					fresh:           fresh,
-					hiveRole:        hiveRoleCoordinator,
-					runDir:          runDir,
-					commandLabel:    labels[0],
-					coordinatorBase: base,
-				}
-				if err := openRun(configPath, t.Handle, "", coordOpts); err != nil {
-					return fmt.Errorf("open coordinator for %s: %w", t.Handle, err)
-				}
+			baseOpts := openOptions{
+				issue:           t.IssueNum,
+				extraContext:    t.ExtraContext,
+				pkg:             t.Package,
+				openTab:         true,
+				fresh:           fresh,
+				coordinatorBase: base,
+			}
+			if err := launchLabelSet(configPath, t.Handle, baseBranchName, base, effectiveCfg, labels, baseOpts, resolveBranch); err != nil {
+				return fmt.Errorf("task %s: %w", t.Handle, err)
 			}
 			continue
 		}
@@ -302,10 +258,7 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 		var branch string
 		if t.IssueNum == "" {
 			// No issue — derive branch name from handle.
-			branch = t.Handle
-			if effectiveCfg.BranchNameFormat != "" && !strings.Contains(effectiveCfg.BranchNameFormat, "{issue}") {
-				branch = github.FormatBranchName(effectiveCfg.BranchNameFormat, "", t.Handle)
-			}
+			branch = deriveBranchBase(effectiveCfg.BranchNameFormat, "", t.Handle)
 			fmt.Fprintf(os.Stderr, "No-issue task %q — branch: %s\n", t.Handle, branch)
 		} else {
 			if !forceBranch {
@@ -381,12 +334,17 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 	return nil
 }
 
-// benchmarkBaseBranch returns the base branch name used to derive per-label
-// benchmark branches. When a branch_name_format is set the formatted name is
-// used; otherwise the handle is used as a short, predictable base.
-func benchmarkBaseBranch(format, issue, handle string) string {
-	if format != "" {
+// deriveBranchBase returns the base branch name for a task: the formatted
+// name when a branch_name_format is configured and usable (skipped for a
+// no-issue task when the format needs {issue}, to avoid a name with an empty
+// placeholder), falling back to "<issue>-<handle>" (or bare handle when
+// there's no issue) so the issue number is never silently dropped.
+func deriveBranchBase(format, issue, handle string) string {
+	if format != "" && (issue != "" || !strings.Contains(format, "{issue}")) {
 		return github.FormatBranchName(format, issue, handle)
+	}
+	if issue != "" {
+		return issue + "-" + handle
 	}
 	return handle
 }
