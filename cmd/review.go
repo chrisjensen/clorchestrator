@@ -72,6 +72,8 @@ still running.`,
 type tokenTotals struct {
 	label               string
 	worktree            string
+	taskKey             string // task-group identity, layout-agnostic
+	runDir              string // hive run dir; "" in the legacy sibling layout
 	sessions            int
 	inputTokens         int
 	outputTokens        int
@@ -107,6 +109,53 @@ type evalJSON struct {
 // task key.
 func taskKeyOf(worktree, label string) string {
 	return strings.TrimSuffix(worktree, "-"+label)
+}
+
+// discoveredWorktree is one benchmark worktree found on disk for a command
+// label, in either the legacy sibling layout (<prefix>-<base>-<label>) or the
+// hive child layout (<prefix>-<base>/<label>, with sentinels at the run root).
+type discoveredWorktree struct {
+	dir     string // worktree path
+	taskKey string // shared across the labels of one task
+	runDir  string // hive run dir (parent of dir); "" in the sibling layout
+}
+
+// discoverWorktrees globs both benchmark layouts for a command label. parent is
+// the repo's parent directory, prefix the worktree prefix.
+func discoverWorktrees(server, parent, prefix, label string) ([]discoveredWorktree, error) {
+	var out []discoveredWorktree
+	// Legacy sibling layout: <parent>/<prefix>-<base>-<label>.
+	siblings, err := remoteGlob(server, filepath.Join(parent, prefix+"-*-"+label))
+	if err != nil {
+		return nil, err
+	}
+	for _, dir := range siblings {
+		out = append(out, discoveredWorktree{dir: dir, taskKey: taskKeyOf(filepath.Base(dir), label)})
+	}
+	// Hive child layout: <parent>/<prefix>-<base>/<label>. The task key is the
+	// run dir's base name (workers of one task share it).
+	children, err := remoteGlob(server, filepath.Join(parent, prefix+"-*", label))
+	if err != nil {
+		return nil, err
+	}
+	for _, dir := range children {
+		runDir := filepath.Dir(dir)
+		out = append(out, discoveredWorktree{dir: dir, taskKey: filepath.Base(runDir), runDir: runDir})
+	}
+	return out, nil
+}
+
+// worktreeDone reports whether a worktree's session ran to completion: either
+// the legacy <worktree>/.clorchestrate-done marker, or the hive sentinel
+// <runDir>/<label>.impl.done at the run-dir root.
+func worktreeDone(server string, w discoveredWorktree, label string) bool {
+	if remoteFileExists(server, filepath.Join(w.dir, ".clorchestrate-done")) {
+		return true
+	}
+	if w.runDir != "" && remoteFileExists(server, filepath.Join(w.runDir, label+".impl.done")) {
+		return true
+	}
+	return false
 }
 
 // resolveConfigPaths returns the config file(s) to scan: just configArg if
@@ -204,23 +253,23 @@ func reviewRun(configArg string, evaluate, fresh, force bool, groups []string) e
 
 			scanCfgStart := len(rows)
 			for _, command := range scanCfg.Commands {
-				// Glob for worktrees ending with the label suffix.
-				pattern := filepath.Join(parent, prefix+"-*-"+command.Label)
-				matches, err := remoteGlob(scanCfg.Server, pattern)
+				// Glob both the legacy sibling and hive child layouts.
+				worktrees, err := discoverWorktrees(scanCfg.Server, parent, prefix, command.Label)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "warning: glob %s: %v\n", pattern, err)
+					fmt.Fprintf(os.Stderr, "warning: glob for %s: %v\n", command.Label, err)
 					continue
 				}
 
-				for _, worktreeDir := range matches {
+				for _, w := range worktrees {
+					worktreeDir := w.dir
 					if seen[worktreeDir] {
 						continue
 					}
 					// Only evaluate worktrees where the session ran to completion.
-					if !remoteFileExists(scanCfg.Server, filepath.Join(worktreeDir, ".clorchestrate-done")) {
+					if !worktreeDone(scanCfg.Server, w, command.Label) {
 						continue
 					}
-					if len(groups) > 0 && !slices.Contains(groups, taskKeyOf(filepath.Base(worktreeDir), command.Label)) {
+					if len(groups) > 0 && !slices.Contains(groups, w.taskKey) {
 						continue
 					}
 					seen[worktreeDir] = true
@@ -232,6 +281,8 @@ func reviewRun(configArg string, evaluate, fresh, force bool, groups []string) e
 					}
 					totals.label = command.Label
 					totals.worktree = filepath.Base(worktreeDir)
+					totals.taskKey = w.taskKey
+					totals.runDir = w.runDir
 					if evaluate {
 						totals.dir = worktreeDir
 						totals.server = scanCfg.Server
@@ -310,7 +361,7 @@ func reviewRun(configArg string, evaluate, fresh, force bool, groups []string) e
 func markIncompleteGroups(rows []tokenTotals, scanCfg *config.Config, force bool) {
 	checked := map[string]bool{}
 	for i := range rows {
-		taskKey := taskKeyOf(rows[i].worktree, rows[i].label)
+		taskKey := rows[i].taskKey
 		if checked[taskKey] {
 			continue
 		}
@@ -321,11 +372,18 @@ func markIncompleteGroups(rows []tokenTotals, scanCfg *config.Config, force bool
 			if cmd.Label == rows[i].label {
 				continue
 			}
-			siblingDir := filepath.Join(rows[i].parent, taskKey+"-"+cmd.Label)
-			if !remoteDirExists(rows[i].server, siblingDir) {
+			// The sibling shares this row's layout: hive siblings live under the
+			// run dir, legacy siblings alongside the repo.
+			var sib discoveredWorktree
+			if rows[i].runDir != "" {
+				sib = discoveredWorktree{dir: filepath.Join(rows[i].runDir, cmd.Label), runDir: rows[i].runDir}
+			} else {
+				sib = discoveredWorktree{dir: filepath.Join(rows[i].parent, taskKey+"-"+cmd.Label)}
+			}
+			if !remoteDirExists(rows[i].server, sib.dir) {
 				continue // that label was never run for this task
 			}
-			if !remoteFileExists(rows[i].server, filepath.Join(siblingDir, ".clorchestrate-done")) {
+			if !worktreeDone(rows[i].server, sib, cmd.Label) {
 				missing = append(missing, cmd.Label)
 			}
 		}
@@ -340,7 +398,7 @@ func markIncompleteGroups(rows []tokenTotals, scanCfg *config.Config, force bool
 
 		fmt.Fprintf(os.Stderr, "skipping group %s: siblings not done yet: %v\n", taskKey, missing)
 		for j := range rows {
-			if taskKeyOf(rows[j].worktree, rows[j].label) == taskKey {
+			if rows[j].taskKey == taskKey {
 				rows[j].skipEval = true
 			}
 		}
@@ -356,8 +414,7 @@ func runGroupedEvaluations(rows []tokenTotals) {
 		if r.skipEval {
 			continue
 		}
-		taskKey := taskKeyOf(r.worktree, r.label)
-		groups[taskKey] = append(groups[taskKey], i)
+		groups[r.taskKey] = append(groups[r.taskKey], i)
 	}
 
 	for _, indices := range groups {
