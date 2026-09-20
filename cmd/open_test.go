@@ -128,32 +128,36 @@ func TestBuildRemoteCmd_NoClaude(t *testing.T) {
 func TestBuildFollowupCmd(t *testing.T) {
 	wd := "~/src/extractor-branch-x"
 	defaultCmd := "headclaude --model opus"
-	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false, true, defaultCmd); !strings.Contains(got, "cd ~/src/extractor-branch-x && headclaude --model opus --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false, true, true, defaultCmd); !strings.Contains(got, "cd ~/src/extractor-branch-x && headclaude --model opus --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
 		t.Errorf("ModeFullTask fresh: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false, false, defaultCmd); got != "cd ~/src/extractor-branch-x && headclaude --model opus" {
+	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false, false, true, defaultCmd); got != "cd ~/src/extractor-branch-x && headclaude --model opus" {
 		t.Errorf("ModeWorktree no prompt: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false, true, defaultCmd); !strings.Contains(got, "cd ~/src/extractor-branch-x && headclaude --model opus --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
+	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false, true, true, defaultCmd); !strings.Contains(got, "cd ~/src/extractor-branch-x && headclaude --model opus --permission-mode plan \"$(cat /tmp/task-h.prompt.md)\"") {
 		t.Errorf("ModeWorktree with prompt: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeFullTask, "h", wd, "123.x", false, true, defaultCmd); got != "" {
+	// Hive sessions pass forcePlan=false: the skill prompt runs without plan mode.
+	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", false, true, false, defaultCmd); got != `cd ~/src/extractor-branch-x && headclaude --model opus "$(cat /tmp/task-h.prompt.md)"` {
+		t.Errorf("hive no-plan with prompt: got %q", got)
+	}
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "123.x", false, true, true, defaultCmd); got != "" {
 		t.Errorf("reattach should suppress followup: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeHandleSession, "h", wd, "", false, false, defaultCmd); got != "" {
+	if got := buildFollowupCmd(ModeHandleSession, "h", wd, "", false, false, true, defaultCmd); got != "" {
 		t.Errorf("ModeHandleSession should have no followup: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", true, true, defaultCmd); got != "" {
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", true, true, true, defaultCmd); got != "" {
 		t.Errorf("noClaude ModeFullTask should suppress followup: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", true, false, defaultCmd); got != "" {
+	if got := buildFollowupCmd(ModeWorktree, "h", wd, "", true, false, true, defaultCmd); got != "" {
 		t.Errorf("noClaude ModeWorktree should suppress followup: got %q", got)
 	}
 	templateCmd := "kopencode --agent plan --prompt {prompt}"
-	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false, true, templateCmd); got != `cd ~/src/extractor-branch-x && kopencode --agent plan --prompt "$(cat /tmp/task-h.prompt.md)"` {
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false, true, true, templateCmd); got != `cd ~/src/extractor-branch-x && kopencode --agent plan --prompt "$(cat /tmp/task-h.prompt.md)"` {
 		t.Errorf("template with prompt: got %q", got)
 	}
-	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false, false, templateCmd); got != "cd ~/src/extractor-branch-x && kopencode --agent plan --prompt {prompt}" {
+	if got := buildFollowupCmd(ModeFullTask, "h", wd, "", false, false, true, templateCmd); got != "cd ~/src/extractor-branch-x && kopencode --agent plan --prompt {prompt}" {
 		t.Errorf("template no prompt: got %q", got)
 	}
 }

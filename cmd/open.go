@@ -36,7 +36,22 @@ type openOptions struct {
 	noClaude       bool   // open the screen session in the worktree but don't launch claude
 	benchmarkLabel string // non-empty when opening one variant of a benchmark run
 	commandLabel   string // non-empty when a task selects a specific [[command]] via 'command:'
+
+	// Hive coordination (multi-session benchmark runs). hiveRole is "worker" or
+	// "coordinator" when set. Workers run in <runDir>/<benchmarkLabel> and are
+	// prompted with /hive-worker; the coordinator runs in runDir itself and is
+	// prompted with /hive-coordinate <coordinatorBase>. See the hive-worker /
+	// hive-coordinate skills.
+	hiveRole        string
+	runDir          string
+	coordinatorBase string
 }
+
+// Hive role values for openOptions.hiveRole.
+const (
+	hiveRoleWorker      = "worker"
+	hiveRoleCoordinator = "coordinator"
+)
 
 func NewOpenCmd() *cobra.Command {
 	var opts openOptions
@@ -150,6 +165,11 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 	if err != nil {
 		return err
 	}
+	// The coordinator has no branch/worktree of its own; run it as a worktree-style
+	// session whose working directory is the run dir.
+	if opts.hiveRole == hiveRoleCoordinator {
+		mode = ModeWorktree
+	}
 
 	configID, err := config.ConfigID(configPath)
 	if err != nil {
@@ -166,10 +186,33 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 	if opts.benchmarkLabel != "" {
 		sessionName = sessionName + "_" + opts.benchmarkLabel
 	}
+	if opts.hiveRole == hiveRoleCoordinator {
+		sessionName = sessionName + "_coordinator"
+	}
+
+	// Temp setup files (task conf, prompt, task.md) are keyed by a per-session
+	// slug, not just the handle: hive/benchmark sessions share a handle but need
+	// distinct prompt files, since the tab followup cat's the prompt file
+	// asynchronously and would otherwise read a sibling session's prompt.
+	slug := handle
+	if opts.benchmarkLabel != "" {
+		slug += "-" + opts.benchmarkLabel
+	}
+	if opts.hiveRole == hiveRoleCoordinator {
+		slug += "-coordinator"
+	}
 
 	// worktreeDir is needed both for session detection (--restart sessions are
-	// named after the worktree basename) and later for buildRemoteCmd.
+	// named after the worktree basename) and later for buildRemoteCmd. In hive
+	// mode a worker lives in <runDir>/<label> and the coordinator runs in the
+	// run dir itself (no worktree of its own).
 	worktreeDir := worktreePath(cfg.RemoteRepo, branch, cfg.WorktreePrefix)
+	switch opts.hiveRole {
+	case hiveRoleWorker:
+		worktreeDir = filepath.Join(opts.runDir, opts.benchmarkLabel)
+	case hiveRoleCoordinator:
+		worktreeDir = opts.runDir
+	}
 	worktreeBase := filepath.Base(worktreeDir)
 
 	// findSession checks sessionName first, then falls back to worktreeBase so
@@ -220,15 +263,29 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 			WorktreePrefix: cfg.WorktreePrefix,
 			PostSetupCmd:   cfg.PostSetupCmd,
 		}
+		if opts.hiveRole != "" {
+			// The checkout script creates the run dir and copies task.md there. A
+			// worker gets its worktree at <runDir>/<label>; the coordinator has no
+			// worktree (empty WorktreeDir + empty Branch => run-dir-only setup).
+			tc.RunDir = opts.runDir
+			if opts.hiveRole == hiveRoleWorker {
+				tc.WorktreeDir = worktreeDir
+			} else {
+				tc.Branch = ""
+			}
+		}
 		if mode == ModeFullTask {
 			tc.Issue = issueNum
 			tc.IssueRepo = cfg.IssueRepo
 		}
-		if err := writeTaskConf(cfg.Server, handle, tc); err != nil {
+		if err := writeTaskConf(cfg.Server, slug, tc); err != nil {
 			return err
 		}
 		if !opts.noClaude {
-			var prompt string
+			// The task body (issue ref / description + planning context) is what a
+			// session works from. In hive mode it lives in <runDir>/task.md (read by
+			// the hive-worker skill); otherwise it is the initial Claude prompt.
+			var taskBody string
 			if mode == ModeFullTask {
 				p, err := prompts.Prompt(prompts.PromptData{
 					IssueNum:        issueNum,
@@ -240,8 +297,8 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 				if err != nil {
 					return fmt.Errorf("building issue prompt: %w", err)
 				}
-				prompt = p
-			} else if mode == ModeWorktree && (opts.extraContext != "" || opts.benchmarkLabel != "") {
+				taskBody = p
+			} else if opts.hiveRole != "" || (mode == ModeWorktree && (opts.extraContext != "" || opts.benchmarkLabel != "")) {
 				p, err := prompts.Prompt(prompts.PromptData{
 					PlanningContext: cfg.PlanningContext,
 					Description:     opts.extraContext,
@@ -249,20 +306,40 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 				if err != nil {
 					return fmt.Errorf("building task prompt: %w", err)
 				}
-				prompt = p
+				taskBody = p
 			}
-			if opts.benchmarkLabel != "" && prompt != "" {
-				prompt += "\n- Once committed and any quality checks have been completed, touch the file .clorchestrate-done in the working directory.\n" +
-					"- .clorchestrate-done MUST NOT be committed — it must remain a local-only file. Add it to .gitignore if necessary.\n"
-			}
-			if prompt != "" {
-				if err := writePromptFile(cfg.Server, handle, prompt); err != nil {
+
+			if opts.hiveRole != "" {
+				// Coordination happens through files in the run dir; the launch prompt
+				// is just the skill invocation. task.md carries the task itself.
+				if taskBody != "" {
+					if err := writeTaskMD(cfg.Server, slug, taskBody); err != nil {
+						return err
+					}
+				}
+				launchPrompt := "/hive-worker"
+				if opts.hiveRole == hiveRoleCoordinator {
+					launchPrompt = "/hive-coordinate " + opts.coordinatorBase
+				}
+				if err := writePromptFile(cfg.Server, slug, launchPrompt); err != nil {
 					return err
 				}
 				wrotePrompt = true
+			} else {
+				prompt := taskBody
+				if opts.benchmarkLabel != "" && prompt != "" {
+					prompt += "\n- Once committed and any quality checks have been completed, touch the file .clorchestrate-done in the working directory.\n" +
+						"- .clorchestrate-done MUST NOT be committed — it must remain a local-only file. Add it to .gitignore if necessary.\n"
+				}
+				if prompt != "" {
+					if err := writePromptFile(cfg.Server, slug, prompt); err != nil {
+						return err
+					}
+					wrotePrompt = true
+				}
 			}
 		}
-		if err := runSetup(cfg.Server, handle); err != nil {
+		if err := runSetup(cfg.Server, slug); err != nil {
 			return fmt.Errorf("setup failed: %w", err)
 		}
 		fmt.Fprintln(os.Stderr, "Setup complete — launching session.")
@@ -284,7 +361,11 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 	}
 
 	remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID, worktreeDir, opts.noClaude)
-	followup := buildFollowupCmd(mode, handle, worktreeDir, existingSessID, opts.noClaude, wrotePrompt, claudeCmd)
+	// Hive sessions launch a skill invocation as the first prompt and must not
+	// start in plan mode — the worker writes PLAN.md and later implements, both
+	// of which plan mode would block.
+	forcePlan := opts.hiveRole == ""
+	followup := buildFollowupCmd(mode, slug, worktreeDir, existingSessID, opts.noClaude, wrotePrompt, forcePlan, claudeCmd)
 
 	tabColor := config.ResolveTabColor(cfg.ITermTabColor, configPath)
 	if opts.openTab {
@@ -351,16 +432,16 @@ func syncServerScripts(server string) error {
 	all := scripts.All()
 	specs := make([]sync.Script, len(all))
 	for i, s := range all {
-		specs[i] = sync.Script{Name: s.Name, Content: s.Content}
+		specs[i] = sync.Script{Name: s.Name, Content: s.Content, Dir: s.Dir}
 	}
 	return sync.SyncScripts(server, specs, sync.DefaultRunner, func(format string, a ...any) {
 		fmt.Fprintf(os.Stderr, format, a...)
 	})
 }
 
-func writeTaskConf(server, handle string, tc conffile.TaskConf) error {
-	content := conffile.Render(tc)
-	path := fmt.Sprintf("/tmp/task-%s.conf", handle)
+// writeRemoteFile writes content to path on the server (or locally when server
+// is ""). desc is used only for error messages.
+func writeRemoteFile(server, path, content, desc string) error {
 	if server == "" {
 		return os.WriteFile(path, []byte(content), 0644)
 	}
@@ -369,24 +450,23 @@ func writeTaskConf(server, handle string, tc conffile.TaskConf) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("write task conf on %s: %w", server, err)
+		return fmt.Errorf("write %s on %s: %w", desc, server, err)
 	}
 	return nil
 }
 
+func writeTaskConf(server, handle string, tc conffile.TaskConf) error {
+	return writeRemoteFile(server, fmt.Sprintf("/tmp/task-%s.conf", handle), conffile.Render(tc), "task conf")
+}
+
 func writePromptFile(server, handle, prompt string) error {
-	path := fmt.Sprintf("/tmp/task-%s.prompt.md", handle)
-	if server == "" {
-		return os.WriteFile(path, []byte(prompt), 0644)
-	}
-	cmd := exec.Command("ssh", server, fmt.Sprintf("cat > %s", path))
-	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("write prompt file on %s: %w", server, err)
-	}
-	return nil
+	return writeRemoteFile(server, fmt.Sprintf("/tmp/task-%s.prompt.md", handle), prompt, "prompt file")
+}
+
+// writeTaskMD stages the hive task.md body; the checkout script copies it into
+// the run dir as task.md (read by the hive-worker skill).
+func writeTaskMD(server, handle, body string) error {
+	return writeRemoteFile(server, fmt.Sprintf("/tmp/task-%s.md", handle), body, "task.md")
 }
 
 // runSetup runs ~/bin/worktree-checkout.sh <handle>. When server is set it
@@ -519,7 +599,9 @@ func buildRemoteCmd(cfg *config.Config, mode Mode, handle, sessionName, existing
 // claude (and any subsequent commands after claude exits) run from there.
 // Returns "" when no followup should be typed (reattach, non-task modes, or
 // noClaude — screen has already cd'd into the worktree in that case).
-func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string, noClaude, withPrompt bool, claudeCmd string) string {
+// forcePlan adds --permission-mode plan for the plain (non-template) claude
+// launch; hive sessions pass false because the skill drives its own workflow.
+func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string, noClaude, withPrompt, forcePlan bool, claudeCmd string) string {
 	if existingSessID != "" || noClaude {
 		return ""
 	}
@@ -531,7 +613,10 @@ func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string, noC
 				expanded := strings.ReplaceAll(claudeCmd, "{prompt}", promptExpr)
 				return fmt.Sprintf("cd %s && %s", worktreeDir, expanded)
 			}
-			return fmt.Sprintf(`cd %s && %s --permission-mode plan %s`, worktreeDir, claudeCmd, promptExpr)
+			if forcePlan {
+				return fmt.Sprintf(`cd %s && %s --permission-mode plan %s`, worktreeDir, claudeCmd, promptExpr)
+			}
+			return fmt.Sprintf(`cd %s && %s %s`, worktreeDir, claudeCmd, promptExpr)
 		}
 		return fmt.Sprintf(`cd %s && %s`, worktreeDir, claudeCmd)
 	}
