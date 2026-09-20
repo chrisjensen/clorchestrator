@@ -184,22 +184,22 @@ func TestWorktreePath(t *testing.T) {
 
 func TestParseScreenLs(t *testing.T) {
 	cases := []struct {
-		name   string
-		input  string
-		want   []screenSession
+		name  string
+		input string
+		want  []screenSession
 	}{
 		{
-			name: "detached without timestamp",
+			name:  "detached without timestamp",
 			input: "\t12345.mycon_handle\t(Detached)\n",
 			want:  []screenSession{{name: "mycon_handle", state: "Detached"}},
 		},
 		{
-			name: "detached with timestamp",
+			name:  "detached with timestamp",
 			input: "\t12345.mycon_handle\t(04/26/26 12:28:46)\t(Detached)\n",
 			want:  []screenSession{{name: "mycon_handle", state: "Detached"}},
 		},
 		{
-			name: "attached with timestamp",
+			name:  "attached with timestamp",
 			input: "\t99999.extra_extract-may\t(04/26/26 12:28:46)\t(Attached)\n",
 			want:  []screenSession{{name: "extra_extract-may", state: "Attached"}},
 		},
@@ -209,7 +209,7 @@ func TestParseScreenLs(t *testing.T) {
 			want:  nil,
 		},
 		{
-			name: "multiple sessions",
+			name:  "multiple sessions",
 			input: "\t111.cfg_a\t(01/01/26 10:00:00)\t(Detached)\n\t222.cfg_b\t(Attached)\n",
 			want: []screenSession{
 				{name: "cfg_a", state: "Detached"},

@@ -21,10 +21,10 @@ import (
 type Mode int
 
 const (
-	ModeBareSession  Mode = iota + 1 // no handle/branch — plain ssh
-	ModeHandleSession                // handle only — screen session at default dir
-	ModeWorktree                     // handle+branch, no issue — worktree + claude
-	ModeFullTask                     // handle+branch+issue — full task
+	ModeBareSession   Mode = iota + 1 // no handle/branch — plain ssh
+	ModeHandleSession                 // handle only — screen session at default dir
+	ModeWorktree                      // handle+branch, no issue — worktree + claude
+	ModeFullTask                      // handle+branch+issue — full task
 )
 
 type openOptions struct {
@@ -37,20 +37,23 @@ type openOptions struct {
 	benchmarkLabel string // non-empty when opening one variant of a benchmark run
 	commandLabel   string // non-empty when a task selects a specific [[command]] via 'command:'
 
-	// Hive coordination (multi-session benchmark runs). hiveRole is "worker" or
-	// "coordinator" when set. Workers run in <runDir>/<benchmarkLabel> and are
-	// prompted with /hive-worker; the coordinator runs in runDir itself and is
-	// prompted with /hive-coordinate <coordinatorBase>. See the hive-worker /
-	// hive-coordinate skills.
-	hiveRole        string
+	// Hive coordination (multi-session benchmark runs). role is set for hive
+	// sessions. Workers run in <runDir>/<benchmarkLabel> and are prompted with
+	// /hive-worker; the coordinator runs in runDir itself and is prompted with
+	// /hive-coordinate <coordinatorBase>. See the hive-worker / hive-coordinate
+	// skills.
+	hiveRole        hiveRole
 	runDir          string
 	coordinatorBase string
 }
 
-// Hive role values for openOptions.hiveRole.
+// hiveRole is a session's role in a hive run; the empty value means not a hive
+// session.
+type hiveRole string
+
 const (
-	hiveRoleWorker      = "worker"
-	hiveRoleCoordinator = "coordinator"
+	hiveRoleWorker      hiveRole = "worker"
+	hiveRoleCoordinator hiveRole = "coordinator"
 )
 
 func NewOpenCmd() *cobra.Command {
@@ -312,7 +315,10 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 			if opts.hiveRole != "" {
 				// Coordination happens through files in the run dir; the launch prompt
 				// is just the skill invocation. task.md carries the task itself.
-				if taskBody != "" {
+				// Only workers write it: they run first and (for issue tasks) render
+				// the full issue prompt, whereas the coordinator has no issue and would
+				// otherwise clobber the run dir's task.md with an empty body.
+				if taskBody != "" && opts.hiveRole == hiveRoleWorker {
 					if err := writeTaskMD(cfg.Server, slug, taskBody); err != nil {
 						return err
 					}
