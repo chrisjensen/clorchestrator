@@ -194,6 +194,33 @@ func TestParse_HeadingExtraSpaces(t *testing.T) {
 	}
 }
 
+func TestParse_CommandList(t *testing.T) {
+	path := writeTemp(t, `## handle
+#100
+command: zai, claude ,
+Some context.
+`)
+	tasks, err := Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(tasks))
+	}
+	want := []string{"zai", "claude"}
+	if len(tasks[0].Commands) != len(want) {
+		t.Fatalf("Commands = %#v, want %#v", tasks[0].Commands, want)
+	}
+	for i, c := range want {
+		if tasks[0].Commands[i] != c {
+			t.Errorf("Commands[%d] = %q, want %q", i, tasks[0].Commands[i], c)
+		}
+	}
+	if strings.Contains(tasks[0].ExtraContext, "command:") {
+		t.Errorf("command line leaked into ExtraContext: %q", tasks[0].ExtraContext)
+	}
+}
+
 func TestNormalizeIssueArg(t *testing.T) {
 	cases := []struct {
 		in   string
