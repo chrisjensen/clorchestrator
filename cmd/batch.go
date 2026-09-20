@@ -47,12 +47,17 @@ Task file format:
                                  'batch <config> --help' to list packages
                                  defined in a given config.
 
-  command: <label>               Optional. Selects a [[command]] from the
+  command: <label>[,<label>...]  Optional. Selects a [[command]] from the
                                  config by label (e.g. 'command: kclaude')
                                  to launch this task with instead of the
-                                 config's default command. Ignored for
-                                 tasks opened via --benchmark, which
-                                 already selects a command per label.
+                                 config's default command. A comma-separated
+                                 list of two or more labels (e.g.
+                                 'command: zai,claude') opens one worker
+                                 session per label plus a coordinator (the
+                                 first label's command) — same as passing
+                                 those labels to --benchmark. Ignored when
+                                 --benchmark is given, which already selects
+                                 a command per label.
 
   <anything else>                Freeform context appended to the Claude
                                  prompt for this task.`,
@@ -135,7 +140,7 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 		return err
 	}
 
-	benchmarkLabels := parseBenchmarkLabels(benchmark)
+	benchmarkLabels := taskfile.SplitCSV(benchmark)
 	// Resolve and validate all benchmark labels against the config before
 	// doing any branch creation or session setup.
 	for i, raw := range benchmarkLabels {
@@ -364,22 +369,6 @@ func batchRun(configPath, tasksPath string, forceBranch, fresh bool, benchmark s
 		}
 	}
 	return nil
-}
-
-// parseBenchmarkLabels splits a comma-separated label string into trimmed,
-// non-empty labels. Returns nil when the input is empty.
-func parseBenchmarkLabels(s string) []string {
-	if s == "" {
-		return nil
-	}
-	var labels []string
-	for _, l := range strings.Split(s, ",") {
-		l = strings.TrimSpace(l)
-		if l != "" {
-			labels = append(labels, l)
-		}
-	}
-	return labels
 }
 
 // benchmarkBaseBranch returns the base branch name used to derive per-label
