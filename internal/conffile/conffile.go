@@ -14,6 +14,11 @@ type TaskConf struct {
 	PostSetupCmd    string
 	PlanningContext string
 	ExtraContext    string
+	// Hive mode: when RunDir is set the checkout script creates the run dir,
+	// places the worktree at WorktreeDir (a child of RunDir) rather than the
+	// derived sibling path, and copies /tmp/task-<handle>.md to <RunDir>/task.md.
+	RunDir      string
+	WorktreeDir string
 }
 
 // Render returns the /tmp/task-<handle>.conf content for a Mode 1 (full task)
@@ -35,6 +40,12 @@ func Render(c TaskConf) string {
 	}
 	if c.IssueRepo != "" {
 		fmt.Fprintf(&b, "ISSUE_REPO=%s\n", c.IssueRepo)
+	}
+	if c.RunDir != "" {
+		fmt.Fprintf(&b, "RUN_DIR=%s\n", c.RunDir)
+	}
+	if c.WorktreeDir != "" {
+		fmt.Fprintf(&b, "WORKTREE_DIR=%s\n", c.WorktreeDir)
 	}
 	fmt.Fprintf(&b, "POST_SETUP_CMD=%s\n", shellQuote(c.PostSetupCmd))
 	if c.Issue != "" {

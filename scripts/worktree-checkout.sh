@@ -13,12 +13,40 @@ CONF="/tmp/task-${HANDLE}.conf"
 # shellcheck disable=SC1090
 source "$CONF"
 
+# Hive mode (multi-session benchmark run): RUN_DIR is a plain directory holding
+# task.md, the coordination sentinels, and one worktree subdir per worker label.
+# When set, prepare_run_dir creates it and stages task.md from /tmp/task-<h>.md.
+RUN_DIR="${RUN_DIR:-}"
+TASK_MD_SRC="/tmp/task-${HANDLE}.md"
+prepare_run_dir() {
+  [[ -z "$RUN_DIR" ]] && return
+  mkdir -p "$RUN_DIR"
+  if [[ -f "$TASK_MD_SRC" ]]; then
+    cp "$TASK_MD_SRC" "$RUN_DIR/task.md"
+    echo "Wrote $RUN_DIR/task.md"
+  fi
+}
+
+# Coordinator: RUN_DIR but no worktree of its own — just prepare the run dir.
+if [[ -n "$RUN_DIR" && -z "${WORKTREE_DIR:-}" ]]; then
+  echo "=== Coordinator run-dir setup ==="
+  echo "  Run dir: $RUN_DIR"
+  prepare_run_dir
+  exit 0
+fi
+
 REPO_ROOT="$(realpath "$REMOTE_REPO")"
 SANITIZED="${BRANCH//\//-}"
 WORKTREE_PREFIX="${WORKTREE_PREFIX:-$(basename "$REPO_ROOT")}"
-WORKTREE_DIR="$(dirname "$REPO_ROOT")/${WORKTREE_PREFIX}-${SANITIZED}"
+# In hive mode WORKTREE_DIR is passed explicitly (a child of RUN_DIR); otherwise
+# derive the sibling-of-repo path.
+WORKTREE_DIR="${WORKTREE_DIR:-$(dirname "$REPO_ROOT")/${WORKTREE_PREFIX}-${SANITIZED}}"
 RESOURCES="$REPO_ROOT/resources"
 POST_SETUP_CMD="${POST_SETUP_CMD:-}"
+
+# Ensure the run dir (worktree parent, in hive mode) exists before git creates
+# the worktree, and stage task.md there.
+prepare_run_dir
 start_background_setup() {
   if [[ ! -d "$REPO_ROOT/node_modules" ]] && [[ -z "$POST_SETUP_CMD" ]]; then
     return
