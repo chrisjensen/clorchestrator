@@ -38,7 +38,7 @@ func TestDetectMode(t *testing.T) {
 
 func TestBuildRemoteCmd_FullTaskFresh(t *testing.T) {
 	cfg := &config.Config{Server: "myserver"}
-	got := buildRemoteCmd(cfg, ModeFullTask, "my-handle", "mycon_my-handle", "", "~/src/extractor-branch-x", false)
+	got := buildRemoteCmd(cfg, ModeFullTask, "my-handle", "mycon_my-handle", "", "~/src/extractor-branch-x", "")
 	if !strings.Contains(got, "ssh -t myserver") {
 		t.Errorf("missing ssh -t: %s", got)
 	}
@@ -52,7 +52,7 @@ func TestBuildRemoteCmd_FullTaskFresh(t *testing.T) {
 
 func TestBuildRemoteCmd_FullTaskReattach(t *testing.T) {
 	cfg := &config.Config{Server: "myserver"}
-	got := buildRemoteCmd(cfg, ModeFullTask, "my-handle", "mycon_my-handle", "12345.mycon_my-handle", "~/src/extractor-branch-x", false)
+	got := buildRemoteCmd(cfg, ModeFullTask, "my-handle", "mycon_my-handle", "12345.mycon_my-handle", "~/src/extractor-branch-x", "")
 	if !strings.Contains(got, "screen -r 12345.mycon_my-handle") {
 		t.Errorf("expected screen -r for reattach: %s", got)
 	}
@@ -63,7 +63,7 @@ func TestBuildRemoteCmd_FullTaskReattach(t *testing.T) {
 
 func TestBuildRemoteCmd_BareSession(t *testing.T) {
 	cfg := &config.Config{Server: "myserver", RemoteRepo: "~/src/repo"}
-	got := buildRemoteCmd(cfg, ModeBareSession, "", "", "", "", false)
+	got := buildRemoteCmd(cfg, ModeBareSession, "", "", "", "", "")
 	if !strings.Contains(got, "cd ~/src/repo") {
 		t.Errorf("missing cd: %s", got)
 	}
@@ -74,7 +74,7 @@ func TestBuildRemoteCmd_BareSession(t *testing.T) {
 
 func TestBuildRemoteCmd_HandleSession(t *testing.T) {
 	cfg := &config.Config{Server: "myserver", RemoteRepo: "~/src/repo"}
-	got := buildRemoteCmd(cfg, ModeHandleSession, "my-handle", "mycon_my-handle", "", "", false)
+	got := buildRemoteCmd(cfg, ModeHandleSession, "my-handle", "mycon_my-handle", "", "", "")
 	if !strings.Contains(got, "ssh -t myserver") {
 		t.Errorf("missing ssh -t: %s", got)
 	}
@@ -98,7 +98,7 @@ func TestBuildRemoteCmd_NoClaude(t *testing.T) {
 	for _, c := range cases {
 		t.Run("remote/"+c.name, func(t *testing.T) {
 			cfg := &config.Config{Server: "myserver"}
-			got := buildRemoteCmd(cfg, c.mode, "h", "mycon_h", "", wd, true)
+			got := buildRemoteCmd(cfg, c.mode, "h", "mycon_h", "", wd, "cd "+wd)
 			want := `ssh -t myserver "screen -S mycon_h bash -c 'cd ~/src/extractor-branch-x && exec bash -l'"`
 			if got != want {
 				t.Errorf("got %q\nwant %q", got, want)
@@ -106,7 +106,7 @@ func TestBuildRemoteCmd_NoClaude(t *testing.T) {
 		})
 		t.Run("local/"+c.name, func(t *testing.T) {
 			cfg := &config.Config{Server: ""}
-			got := buildRemoteCmd(cfg, c.mode, "h", "mycon_h", "", wd, true)
+			got := buildRemoteCmd(cfg, c.mode, "h", "mycon_h", "", wd, "cd "+wd)
 			want := "screen -S mycon_h bash -c 'cd ~/src/extractor-branch-x && exec bash -l'"
 			if got != want {
 				t.Errorf("got %q\nwant %q", got, want)
@@ -118,11 +118,38 @@ func TestBuildRemoteCmd_NoClaude(t *testing.T) {
 	// already has whatever state the user wants to resume.
 	t.Run("reattach overrides noClaude", func(t *testing.T) {
 		cfg := &config.Config{Server: "myserver"}
-		got := buildRemoteCmd(cfg, ModeFullTask, "h", "mycon_h", "999.mycon_h", wd, true)
+		got := buildRemoteCmd(cfg, ModeFullTask, "h", "mycon_h", "999.mycon_h", wd, "cd "+wd)
 		if !strings.Contains(got, "screen -r 999.mycon_h") {
 			t.Errorf("expected screen -r for reattach: %s", got)
 		}
 	})
+}
+
+// TestBuildRemoteCmd_LaunchCmdWithPromptSubstitution guards against
+// regressing the current-terminal (no --tab) launch: the followup command
+// embeds a "$(cat ...)" prompt substitution, which must reach the remote
+// bash -c unevaluated by any shell along the way (ssh -t's local sh -c, and
+// the remote's own shell) so it only runs once, on the remote host.
+func TestBuildRemoteCmd_LaunchCmdWithPromptSubstitution(t *testing.T) {
+	wd := "~/src/extractor-branch-x"
+	launchCmd := `cd ` + wd + ` && headclaude --permission-mode plan "$(cat /tmp/task-h.prompt.md)"`
+
+	cfg := &config.Config{Server: "myserver"}
+	got := buildRemoteCmd(cfg, ModeFullTask, "h", "mycon_h", "", wd, launchCmd)
+	want := `ssh -t myserver "screen -S mycon_h bash -c 'cd ~/src/extractor-branch-x && headclaude --permission-mode plan \"\$(cat /tmp/task-h.prompt.md)\" && exec bash -l'"`
+	if got != want {
+		t.Errorf("got %q\nwant %q", got, want)
+	}
+
+	// Local (no server) has no local-shell-then-ssh double layer, so the
+	// prompt substitution is embedded verbatim inside the single-quoted
+	// bash -c argument.
+	localCfg := &config.Config{Server: ""}
+	gotLocal := buildRemoteCmd(localCfg, ModeFullTask, "h", "mycon_h", "", wd, launchCmd)
+	wantLocal := `screen -S mycon_h bash -c 'cd ~/src/extractor-branch-x && headclaude --permission-mode plan "$(cat /tmp/task-h.prompt.md)" && exec bash -l'`
+	if gotLocal != wantLocal {
+		t.Errorf("got %q\nwant %q", gotLocal, wantLocal)
+	}
 }
 
 func TestBuildFollowupCmd(t *testing.T) {

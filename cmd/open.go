@@ -96,34 +96,25 @@ DISPATCH_ITERM_TAB_COLOR is set) is applied via escape sequences in both modes.`
 				if err != nil {
 					return err
 				}
-				type entry struct {
-					label  string
-					branch string
-				}
-				var entries []entry
+				var labels []string
 				for _, raw := range strings.Split(benchmark, ",") {
 					raw = strings.TrimSpace(raw)
 					if raw == "" {
 						continue
 					}
-					cmd, err := resolvedCfg.ResolveCommand(raw)
+					resolved, err := resolvedCfg.ResolveCommand(raw)
 					if err != nil {
 						return err
 					}
-					labelBranch := branch
-					if labelBranch != "" {
-						labelBranch = branch + "-" + cmd.Label
-					}
-					entries = append(entries, entry{label: cmd.Label, branch: labelBranch})
+					labels = append(labels, resolved.Label)
 				}
-				for _, e := range entries {
-					labelOpts := opts
-					labelOpts.benchmarkLabel = e.label
-					if err := openRun(args[0], handle, e.branch, labelOpts); err != nil {
-						return err
+				resolveBranch := func(label string) (string, error) {
+					if branch == "" {
+						return "", nil
 					}
+					return branch + "-" + label, nil
 				}
-				return nil
+				return launchLabelSet(configPath, handle, branch, "", resolvedCfg, labels, opts, resolveBranch)
 			}
 			return openRun(args[0], handle, branch, opts)
 		},
@@ -372,7 +363,6 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		claudeCmd = labelCmd
 	}
 
-	remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID, worktreeDir, opts.noClaude)
 	// Hive sessions launch a skill invocation as the first prompt and must not
 	// start in plan mode — the worker writes PLAN.md and later implements, both
 	// of which plan mode would block.
@@ -381,12 +371,28 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 
 	tabColor := config.ResolveTabColor(cfg.ITermTabColor, configPath)
 	if opts.openTab {
+		// The tab's AppleScript types followup in after the screen session is
+		// up, so screen itself only needs to cd when there's no followup to
+		// type (noClaude).
+		launchCmd := ""
+		if opts.noClaude {
+			launchCmd = "cd " + worktreeDir
+		}
+		remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID, worktreeDir, launchCmd)
 		return iterm.OpenTab(iterm.TabOptions{
 			TabColorHex: tabColor,
 			RemoteCmd:   remoteCmd,
 			FollowupCmd: followup,
 		})
 	}
+	// The current terminal has no AppleScript-typed followup step, so the
+	// launch command (cd + claude, or just cd for noClaude) must be embedded
+	// directly in what screen runs.
+	launchCmd := followup
+	if launchCmd == "" && opts.noClaude {
+		launchCmd = "cd " + worktreeDir
+	}
+	remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID, worktreeDir, launchCmd)
 	return runInCurrentTerminal(tabColor, remoteCmd)
 }
 
@@ -575,23 +581,44 @@ func killSession(server, sessionID string) error {
 	return cmd.Run()
 }
 
+// screenShellCmd returns the command run inside screen's login shell: either
+// a bare login shell, or launchCmd followed by one, so callers that need to
+// run something before handing control to the interactive shell (cd into a
+// worktree, launch claude) can do so without a separate typed-in followup
+// step.
+func screenShellCmd(launchCmd string) string {
+	if launchCmd == "" {
+		return "bash -l"
+	}
+	return fmt.Sprintf("bash -c '%s && exec bash -l'", launchCmd)
+}
+
+// escapeForSSHDoubleQuotes escapes characters in s that would otherwise be
+// interpreted by the *local* shell (runInCurrentTerminal execs remoteCmd via
+// `sh -c`) when s is embedded inside the outer double-quoted argument of an
+// `ssh -t server "..."` command. Without this, a launchCmd containing
+// "$(...)" (e.g. the claude prompt's "$(cat file)") would have its command
+// substitution run locally instead of on the remote host.
+func escapeForSSHDoubleQuotes(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", "\\$", "`", "\\`")
+	return r.Replace(s)
+}
+
 // buildRemoteCmd is the command the iTerm tab (or current terminal) runs
 // first: connect to an interactive screen session. No setup happens inside
 // screen — that's done by runSetup before the tab opens. When cfg.Server is
-// "" the commands run locally without SSH. When noClaude is true (worktree
-// already has commits), screen cd's into worktreeDir directly so the user
-// lands at a shell in the right place — no followup is typed.
-func buildRemoteCmd(cfg *config.Config, mode Mode, handle, sessionName, existingSessID, worktreeDir string, noClaude bool) string {
+// "" the commands run locally without SSH. launchCmd, when non-empty, runs
+// inside the screen session before the login shell takes over (e.g. cd into
+// worktreeDir, or the full cd+claude followup for the current-terminal path,
+// which has no AppleScript-typed-followup step available).
+func buildRemoteCmd(cfg *config.Config, mode Mode, handle, sessionName, existingSessID, worktreeDir, launchCmd string) string {
 	if cfg.Server == "" {
 		switch mode {
 		case ModeFullTask, ModeWorktree:
 			if existingSessID != "" {
 				return fmt.Sprintf("screen -r %s", existingSessID)
 			}
-			if noClaude {
-				return fmt.Sprintf("screen -S %s bash -c 'cd %s && exec bash -l'", sessionName, worktreeDir)
-			}
-			return fmt.Sprintf("screen -S %s bash -l", sessionName)
+			return fmt.Sprintf("screen -S %s %s", sessionName, screenShellCmd(launchCmd))
 		case ModeHandleSession:
 			return fmt.Sprintf("screen -S %s bash -c 'cd %s && exec bash -l'", sessionName, cfg.RemoteRepo)
 		case ModeBareSession:
@@ -608,11 +635,7 @@ func buildRemoteCmd(cfg *config.Config, mode Mode, handle, sessionName, existing
 			return fmt.Sprintf(`ssh -t %s "screen -r %s"`,
 				cfg.Server, existingSessID)
 		}
-		if noClaude {
-			return fmt.Sprintf(`ssh -t %s "screen -S %s bash -c 'cd %s && exec bash -l'"`,
-				cfg.Server, sessionName, worktreeDir)
-		}
-		return fmt.Sprintf(`ssh -t %s "screen -S %s bash -l"`, cfg.Server, sessionName)
+		return fmt.Sprintf(`ssh -t %s "screen -S %s %s"`, cfg.Server, sessionName, screenShellCmd(escapeForSSHDoubleQuotes(launchCmd)))
 	case ModeHandleSession:
 		return fmt.Sprintf(`ssh -t %s "screen -S %s bash -c 'cd %s && exec bash -l'"`,
 			cfg.Server, sessionName, cfg.RemoteRepo)
@@ -649,6 +672,69 @@ func buildFollowupCmd(mode Mode, handle, worktreeDir, existingSessID string, noC
 		return fmt.Sprintf(`cd %s && %s`, worktreeDir, claudeCmd)
 	}
 	return ""
+}
+
+// launchLabelSet opens one session per label: a plain labeled session for a
+// single label, or — when there are 2+ labels — hive mode (a shared run dir,
+// worker worktrees at <runDir>/<label>, plus a coordinator session). This is
+// the one implementation shared by `open --benchmark` and batch's per-task
+// `command:`/`--benchmark` handling, so both behave identically for the same
+// label count. resolveBranch returns the branch to use for a given label
+// (batch creates/reuses it via gh; open's own --benchmark just suffixes the
+// user-supplied branch). baseRef, when non-empty, is the branch to check
+// "commits ahead" against (batch's resolved default base branch) — passing
+// "" skips that check, matching open's own --benchmark behavior.
+func launchLabelSet(configPath, handle, baseBranch, baseRef string, cfg *config.Config, labels []string, baseOpts openOptions, resolveBranch func(label string) (string, error)) error {
+	hive := len(labels) >= 2
+	runDir := worktreePath(cfg.RemoteRepo, baseBranch, cfg.WorktreePrefix)
+
+	for _, label := range labels {
+		branch, err := resolveBranch(label)
+		if err != nil {
+			return err
+		}
+
+		worktreeDir := worktreePath(cfg.RemoteRepo, branch, cfg.WorktreePrefix)
+		if hive {
+			worktreeDir = filepath.Join(runDir, label)
+		}
+
+		opts := baseOpts
+		opts.benchmarkLabel = label
+		if baseRef != "" {
+			ahead, err := branchAheadCount(cfg.Server, worktreeDir, baseRef)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  warning: could not check commits ahead for %s: %v — proceeding with planning session\n", branch, err)
+				ahead = 0
+			}
+			if ahead > 0 {
+				fmt.Fprintf(os.Stderr, "  Branch is %d commit(s) ahead of %s — opening shell in worktree (no Claude)\n", ahead, baseRef)
+			}
+			opts.noClaude = ahead > 0
+		}
+		if hive {
+			opts.hiveRole = hiveRoleWorker
+			opts.runDir = runDir
+		}
+		if err := openRun(configPath, handle, branch, opts); err != nil {
+			return fmt.Errorf("open for %s/%s: %w", handle, label, err)
+		}
+	}
+
+	if hive {
+		// The coordinator has no issue/branch of its own — clear issue so
+		// detectMode doesn't see a dangling issue with no branch.
+		coordOpts := baseOpts
+		coordOpts.issue = ""
+		coordOpts.benchmarkLabel = ""
+		coordOpts.hiveRole = hiveRoleCoordinator
+		coordOpts.runDir = runDir
+		coordOpts.commandLabel = labels[0]
+		if err := openRun(configPath, handle, "", coordOpts); err != nil {
+			return fmt.Errorf("open coordinator for %s: %w", handle, err)
+		}
+	}
+	return nil
 }
 
 // worktreePath mirrors the layout used by scripts/worktree-checkout.sh:
