@@ -178,6 +178,11 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 	if issueNum != "" {
 		sessionName = sessionName + "_" + issueNum
 	}
+	// runKey identifies this session's run for tab coloring — the same value
+	// reconnect.go's runKeyAndLabel recovers later by stripping the
+	// _<label>/_coordinator suffix back off the session name, so a run keeps
+	// the same color whether just launched or reconnected afterward.
+	runKey := sessionName
 	if opts.benchmarkLabel != "" {
 		sessionName = sessionName + "_" + opts.benchmarkLabel
 	}
@@ -370,6 +375,12 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 	followup := buildFollowupCmd(mode, slug, worktreeDir, existingSessID, opts.noClaude, wrotePrompt, forcePlan, claudeCmd)
 
 	tabColor := config.ResolveTabColor(cfg.ITermTabColor, configPath)
+	if opts.runDir != "" {
+		// Sibling label sessions (and the hive coordinator) share runKey —
+		// color them by run instead of by config so an A/B run's tabs are
+		// visually grouped and distinct from other runs under the same config.
+		tabColor = config.RunGroupColor(runKey)
+	}
 	if opts.openTab {
 		// The tab's AppleScript types followup in after the screen session is
 		// up, so screen itself only needs to cd when there's no followup to
