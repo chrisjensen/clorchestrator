@@ -22,6 +22,19 @@ func hiveLaunchPrompt(role hiveRole, taskBody, coordinatorBase string) string {
 	return prompt
 }
 
+// resolveClaudeCmd picks the session's claude-launch command: the command
+// matching the benchmark label if one is set, else the command label, else the
+// config default.
+func resolveClaudeCmd(cfg *config.Config, opts openOptions) (string, error) {
+	if opts.benchmarkLabel != "" {
+		return cfg.CommandByLabel(opts.benchmarkLabel)
+	}
+	if opts.commandLabel != "" {
+		return cfg.CommandByLabel(opts.commandLabel)
+	}
+	return cfg.DefaultClaudeCmd(), nil
+}
+
 // escapeForSSHDoubleQuotes escapes characters in s that would otherwise be
 // interpreted by the *local* shell (runInCurrentTerminal execs remoteCmd via
 // `sh -c`) when s is embedded inside the outer double-quoted argument of an

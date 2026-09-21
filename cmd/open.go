@@ -6,12 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/chrisjensen/clorchestrate/internal/conffile"
 	"github.com/chrisjensen/clorchestrate/internal/config"
 	"github.com/chrisjensen/clorchestrate/internal/iterm"
 	"github.com/chrisjensen/clorchestrate/internal/sync"
 	"github.com/chrisjensen/clorchestrate/internal/taskfile"
-	"github.com/chrisjensen/clorchestrate/prompts"
 	"github.com/chrisjensen/clorchestrate/scripts"
 	"github.com/spf13/cobra"
 )
@@ -54,6 +52,74 @@ const (
 	hiveRoleWorker      hiveRole = "worker"
 	hiveRoleCoordinator hiveRole = "coordinator"
 )
+
+// openSessionPlan is the derived identity of one session launch, shared by
+// openRun's phase helpers: the screen session name, the tab-color run key,
+// the /tmp/task-<slug>.* file slug, and the worktree directory (plus its
+// basename) the session lives in.
+type openSessionPlan struct {
+	sessionName    string
+	runKey         string
+	slug           string
+	worktreeDir    string
+	worktreeBase   string
+	existingSessID string // filled in by checkExistingSession
+	wrotePrompt    bool   // filled in by runSessionSetup
+}
+
+// planSession derives a session's identity: its screen session name, run key,
+// temp-file slug, and worktree directory.
+func planSession(cfg *config.Config, configID, handle, branch, issueNum string, opts openOptions) openSessionPlan {
+	sessionName := configID + "_" + handle
+	if opts.pkg != "" {
+		sessionName = opts.pkg + "_" + handle
+	}
+	if issueNum != "" {
+		sessionName = sessionName + "_" + issueNum
+	}
+	// runKey identifies this session's run for tab coloring — the same value
+	// reconnect.go's runKeyAndLabel recovers later by stripping the
+	// _<label>/_coordinator suffix back off the session name, so a run keeps
+	// the same color whether just launched or reconnected afterward.
+	runKey := sessionName
+	if opts.benchmarkLabel != "" {
+		sessionName = sessionName + "_" + opts.benchmarkLabel
+	}
+	if opts.hiveRole == hiveRoleCoordinator {
+		sessionName = sessionName + "_coordinator"
+	}
+
+	// Temp setup files (task conf, prompt, task.md) are keyed by a per-session
+	// slug, not just the handle: hive/benchmark sessions share a handle but need
+	// distinct prompt files, since the tab followup cat's the prompt file
+	// asynchronously and would otherwise read a sibling session's prompt.
+	slug := handle
+	if opts.benchmarkLabel != "" {
+		slug += "-" + opts.benchmarkLabel
+	}
+	if opts.hiveRole == hiveRoleCoordinator {
+		slug += "-coordinator"
+	}
+
+	// worktreeDir is needed both for session detection (--restart sessions are
+	// named after the worktree basename) and later for buildRemoteCmd. In hive
+	// mode a worker lives in <runDir>/<label> and the coordinator runs in the
+	// run dir itself (no worktree of its own).
+	worktreeDir := worktreePath(cfg.RemoteRepo, branch, cfg.WorktreePrefix)
+	switch opts.hiveRole {
+	case hiveRoleWorker:
+		worktreeDir = filepath.Join(opts.runDir, opts.benchmarkLabel)
+	case hiveRoleCoordinator:
+		worktreeDir = opts.runDir
+	}
+	return openSessionPlan{
+		sessionName:  sessionName,
+		runKey:       runKey,
+		slug:         slug,
+		worktreeDir:  worktreeDir,
+		worktreeBase: filepath.Base(worktreeDir),
+	}
+}
 
 func NewOpenCmd() *cobra.Command {
 	var opts openOptions
@@ -126,23 +192,43 @@ DISPATCH_ITERM_TAB_COLOR is set) is applied via escape sequences in both modes.`
 	return cmd
 }
 
-func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
+// loadOpenConfig resolves the config path, parses it, applies any package
+// overrides, rejects unimplemented dispatch modes, and derives the config ID
+// used for default session names.
+func loadOpenConfig(rawConfigPath, pkg string) (*config.Config, string, string, error) {
 	configPath, err := resolveConfigPath(rawConfigPath)
 	if err != nil {
-		return err
+		return nil, "", "", err
 	}
-
 	baseCfg, err := config.Parse(configPath)
 	if err != nil {
+		return nil, "", "", err
+	}
+	cfg, err := baseCfg.ResolvePackage(pkg)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if cfg.DispatchMode != "" && cfg.DispatchMode != "ssh" {
+		return nil, "", "", fmt.Errorf("dispatch mode %q not yet implemented (only ssh supported)", cfg.DispatchMode)
+	}
+	configID, err := config.ConfigID(configPath)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return cfg, configPath, configID, nil
+}
+
+func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
+	if err := validateSafeName("handle", handle); err != nil {
 		return err
 	}
-	cfg, err := baseCfg.ResolvePackage(opts.pkg)
-	if err != nil {
+	if err := validateSafeName("branch", branch); err != nil {
 		return err
 	}
 
-	if cfg.DispatchMode != "" && cfg.DispatchMode != "ssh" {
-		return fmt.Errorf("dispatch mode %q not yet implemented (only ssh supported)", cfg.DispatchMode)
+	cfg, configPath, configID, err := loadOpenConfig(rawConfigPath, opts.pkg)
+	if err != nil {
+		return err
 	}
 
 	issueNum := ""
@@ -164,220 +250,45 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		mode = ModeWorktree
 	}
 
-	configID, err := config.ConfigID(configPath)
+	plan := planSession(cfg, configID, handle, branch, issueNum, opts)
+
+	if mode == ModeFullTask || mode == ModeWorktree {
+		var skip bool
+		plan.existingSessID, skip = checkExistingSession(cfg, opts.fresh, plan.sessionName, plan.worktreeBase)
+		if skip {
+			return nil
+		}
+	}
+
+	if (mode == ModeFullTask || mode == ModeWorktree) && plan.existingSessID == "" {
+		if err := runSessionSetup(cfg, mode, opts, handle, branch, issueNum, &plan); err != nil {
+			return err
+		}
+	}
+
+	claudeCmd, err := resolveClaudeCmd(cfg, opts)
 	if err != nil {
 		return err
 	}
 
-	sessionName := configID + "_" + handle
-	if opts.pkg != "" {
-		sessionName = opts.pkg + "_" + handle
-	}
-	if issueNum != "" {
-		sessionName = sessionName + "_" + issueNum
-	}
-	// runKey identifies this session's run for tab coloring — the same value
-	// reconnect.go's runKeyAndLabel recovers later by stripping the
-	// _<label>/_coordinator suffix back off the session name, so a run keeps
-	// the same color whether just launched or reconnected afterward.
-	runKey := sessionName
-	if opts.benchmarkLabel != "" {
-		sessionName = sessionName + "_" + opts.benchmarkLabel
-	}
-	if opts.hiveRole == hiveRoleCoordinator {
-		sessionName = sessionName + "_coordinator"
-	}
+	return launchSession(cfg, configPath, handle, opts, plan, mode, claudeCmd)
+}
 
-	// Temp setup files (task conf, prompt, task.md) are keyed by a per-session
-	// slug, not just the handle: hive/benchmark sessions share a handle but need
-	// distinct prompt files, since the tab followup cat's the prompt file
-	// asynchronously and would otherwise read a sibling session's prompt.
-	slug := handle
-	if opts.benchmarkLabel != "" {
-		slug += "-" + opts.benchmarkLabel
-	}
-	if opts.hiveRole == hiveRoleCoordinator {
-		slug += "-coordinator"
-	}
-
-	// worktreeDir is needed both for session detection (--restart sessions are
-	// named after the worktree basename) and later for buildRemoteCmd. In hive
-	// mode a worker lives in <runDir>/<label> and the coordinator runs in the
-	// run dir itself (no worktree of its own).
-	worktreeDir := worktreePath(cfg.RemoteRepo, branch, cfg.WorktreePrefix)
-	switch opts.hiveRole {
-	case hiveRoleWorker:
-		worktreeDir = filepath.Join(opts.runDir, opts.benchmarkLabel)
-	case hiveRoleCoordinator:
-		worktreeDir = opts.runDir
-	}
-	worktreeBase := filepath.Base(worktreeDir)
-
-	// findSession checks sessionName first, then falls back to worktreeBase so
-	// that sessions created by `reconnect --restart` (named after the worktree
-	// directory) are detected even when the open-style name doesn't match.
-	findSession := func() (id, state string) {
-		id, state = findExistingSession(cfg.Server, sessionName)
-		if id == "" && worktreeBase != sessionName {
-			id, state = findExistingSession(cfg.Server, worktreeBase)
-		}
-		return
-	}
-
-	var existingSessID string
-	if mode == ModeFullTask || mode == ModeWorktree {
-		if opts.fresh {
-			if id, _ := findSession(); id != "" {
-				fmt.Fprintf(os.Stderr, "--fresh: killing existing screen session %s (%s)\n", sessionName, id)
-				if err := killSession(cfg.Server, id); err != nil {
-					fmt.Fprintf(os.Stderr, "  warning: kill failed: %v\n", err)
-				}
-			}
-		}
-		id, state := findSession()
-		if id != "" && state != "Detached" {
-			fmt.Fprintf(os.Stderr, "screen session %s exists but is %s — skipping (use --fresh to take over)\n", sessionName, state)
-			return nil
-		}
-		existingSessID = id
-		if existingSessID != "" {
-			fmt.Fprintf(os.Stderr, "screen session %s exists and is Detached (%s) — reattaching (re-run with --fresh to start over)\n", sessionName, existingSessID)
-		}
-	}
-
-	wrotePrompt := false
-	if (mode == ModeFullTask || mode == ModeWorktree) && existingSessID == "" {
-		location := cfg.Server
-		if location == "" {
-			location = "local"
-		}
-		fmt.Fprintf(os.Stderr, "Running setup for %s on %s…\n", handle, location)
-		if err := syncServerScripts(cfg.Server); err != nil {
-			return err
-		}
-		tc := conffile.TaskConf{
-			Branch:         branch,
-			RemoteRepo:     cfg.RemoteRepo,
-			WorktreePrefix: cfg.WorktreePrefix,
-			PostSetupCmd:   cfg.PostSetupCmd,
-		}
-		if opts.hiveRole != "" {
-			// The checkout script creates the run dir and copies task.md there. A
-			// worker gets its worktree at <runDir>/<label>; the coordinator has no
-			// worktree (empty WorktreeDir + empty Branch => run-dir-only setup).
-			tc.RunDir = opts.runDir
-			if opts.hiveRole == hiveRoleWorker {
-				tc.WorktreeDir = worktreeDir
-			} else {
-				tc.Branch = ""
-			}
-		}
-		if mode == ModeFullTask {
-			tc.Issue = issueNum
-			tc.IssueRepo = cfg.IssueRepo
-		}
-		if err := writeTaskConf(cfg.Server, slug, tc); err != nil {
-			return err
-		}
-		if !opts.noClaude {
-			// The task body (issue ref / description + planning context) is what a
-			// session works from. It is always the initial Claude prompt (for a hive
-			// worker, with a trailing instruction to use the hive-worker skill); it's
-			// also mirrored to <runDir>/task.md in hive mode, since the coordinator
-			// reads it too during its merge/review steps.
-			var taskBody string
-			if mode == ModeFullTask {
-				p, err := prompts.Prompt(prompts.PromptData{
-					IssueNum:        issueNum,
-					IssueRepo:       cfg.IssueRepo,
-					IssueURL:        fmt.Sprintf("https://github.com/%s/issues/%s", cfg.IssueRepo, issueNum),
-					PlanningContext: cfg.PlanningContext,
-					ExtraContext:    opts.extraContext,
-				})
-				if err != nil {
-					return fmt.Errorf("building issue prompt: %w", err)
-				}
-				taskBody = p
-			} else if opts.hiveRole != "" || (mode == ModeWorktree && (opts.extraContext != "" || opts.benchmarkLabel != "")) {
-				p, err := prompts.Prompt(prompts.PromptData{
-					PlanningContext: cfg.PlanningContext,
-					Description:     opts.extraContext,
-				})
-				if err != nil {
-					return fmt.Errorf("building task prompt: %w", err)
-				}
-				taskBody = p
-			}
-
-			if opts.hiveRole != "" {
-				// Coordination happens through files in the run dir. A worker's launch
-				// prompt is its task body (so the chat history shows what it was asked
-				// to do) plus an instruction to work it via the hive-worker skill; the
-				// coordinator has no task body, only /hive-coordinate <base>.
-				//
-				// Only workers write task.md: they run first and (for issue tasks)
-				// render the full issue prompt, whereas the coordinator has no issue
-				// and would otherwise clobber the run dir's task.md with an empty body.
-				// The coordinator still reads task.md itself during its merge/review
-				// steps, so it must stay authoritative there regardless of what's in
-				// a worker's own chat history.
-				if taskBody != "" && opts.hiveRole == hiveRoleWorker {
-					if err := writeTaskMD(cfg.Server, slug, taskBody); err != nil {
-						return err
-					}
-				}
-				launchPrompt := hiveLaunchPrompt(opts.hiveRole, taskBody, opts.coordinatorBase)
-				if err := writePromptFile(cfg.Server, slug, launchPrompt); err != nil {
-					return err
-				}
-				wrotePrompt = true
-			} else {
-				prompt := taskBody
-				if opts.benchmarkLabel != "" && prompt != "" {
-					prompt += "\n- Once committed and any quality checks have been completed, touch the file .clorchestrate-done in the working directory.\n" +
-						"- .clorchestrate-done MUST NOT be committed — it must remain a local-only file. Add it to .gitignore if necessary.\n"
-				}
-				if prompt != "" {
-					if err := writePromptFile(cfg.Server, slug, prompt); err != nil {
-						return err
-					}
-					wrotePrompt = true
-				}
-			}
-		}
-		if err := runSetup(cfg.Server, slug); err != nil {
-			return fmt.Errorf("setup failed: %w", err)
-		}
-		fmt.Fprintln(os.Stderr, "Setup complete — launching session.")
-	}
-
-	claudeCmd := cfg.DefaultClaudeCmd()
-	if opts.benchmarkLabel != "" {
-		labelCmd, err := cfg.CommandByLabel(opts.benchmarkLabel)
-		if err != nil {
-			return err
-		}
-		claudeCmd = labelCmd
-	} else if opts.commandLabel != "" {
-		labelCmd, err := cfg.CommandByLabel(opts.commandLabel)
-		if err != nil {
-			return err
-		}
-		claudeCmd = labelCmd
-	}
-
+// launchSession builds the launch commands and dispatches the session to an
+// iTerm tab or the current terminal.
+func launchSession(cfg *config.Config, configPath, handle string, opts openOptions, plan openSessionPlan, mode Mode, claudeCmd string) error {
 	// Hive sessions launch a skill invocation as the first prompt and must not
 	// start in plan mode — the worker writes PLAN.md and later implements, both
 	// of which plan mode would block.
 	forcePlan := opts.hiveRole == ""
-	followup := buildFollowupCmd(mode, slug, worktreeDir, existingSessID, opts.noClaude, wrotePrompt, forcePlan, claudeCmd)
+	followup := buildFollowupCmd(mode, plan.slug, plan.worktreeDir, plan.existingSessID, opts.noClaude, plan.wrotePrompt, forcePlan, claudeCmd)
 
 	tabColor := config.ResolveTabColor(cfg.ITermTabColor, configPath)
 	if opts.runDir != "" {
 		// Sibling label sessions (and the hive coordinator) share runKey —
 		// color them by run instead of by config so an A/B run's tabs are
 		// visually grouped and distinct from other runs under the same config.
-		tabColor = config.RunGroupColor(runKey)
+		tabColor = config.RunGroupColor(plan.runKey)
 	}
 	if opts.openTab {
 		// The tab's AppleScript types followup in after the screen session is
@@ -385,9 +296,9 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 		// type (noClaude).
 		launchCmd := ""
 		if opts.noClaude {
-			launchCmd = "cd " + worktreeDir
+			launchCmd = "cd " + plan.worktreeDir
 		}
-		remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID, worktreeDir, launchCmd)
+		remoteCmd := buildRemoteCmd(cfg, mode, handle, plan.sessionName, plan.existingSessID, plan.worktreeDir, launchCmd)
 		return iterm.OpenTab(iterm.TabOptions{
 			TabColorHex: tabColor,
 			RemoteCmd:   remoteCmd,
@@ -399,9 +310,9 @@ func openRun(rawConfigPath, handle, branch string, opts openOptions) error {
 	// directly in what screen runs.
 	launchCmd := followup
 	if launchCmd == "" && opts.noClaude {
-		launchCmd = "cd " + worktreeDir
+		launchCmd = "cd " + plan.worktreeDir
 	}
-	remoteCmd := buildRemoteCmd(cfg, mode, handle, sessionName, existingSessID, worktreeDir, launchCmd)
+	remoteCmd := buildRemoteCmd(cfg, mode, handle, plan.sessionName, plan.existingSessID, plan.worktreeDir, launchCmd)
 	return runInCurrentTerminal(tabColor, remoteCmd)
 }
 

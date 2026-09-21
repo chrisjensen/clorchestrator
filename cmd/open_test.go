@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -268,6 +269,161 @@ func TestParseScreenLs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestValidateSafeName(t *testing.T) {
+	for _, s := range []string{"Foo-bar_1.2", "9802-foo", ""} {
+		if err := validateSafeName("handle", s); err != nil {
+			t.Errorf("validateSafeName(%q) = %v, want nil", s, err)
+		}
+	}
+	for _, s := range []string{"has space", "a$b", "a`b", `a"b`, "feat/x", "a;b"} {
+		err := validateSafeName("branch", s)
+		if err == nil {
+			t.Errorf("validateSafeName(%q) = nil, want error", s)
+			continue
+		}
+		if !strings.Contains(err.Error(), "invalid branch") {
+			t.Errorf("error for %q missing kind: %v", s, err)
+		}
+	}
+}
+
+func TestPlanSession(t *testing.T) {
+	cfg := &config.Config{RemoteRepo: "~/src/extractor", WorktreePrefix: "extractor"}
+	cases := []struct {
+		name      string
+		handle    string
+		branch    string
+		issueNum  string
+		opts      openOptions
+		session   string
+		runKey    string
+		slug      string
+		worktree  string
+		worktreeB string
+	}{
+		{
+			name: "bare handle", handle: "h", branch: "b",
+			session: "mycon_h", runKey: "mycon_h", slug: "h",
+			worktree: "~/src/extractor-b", worktreeB: "extractor-b",
+		},
+		{
+			name: "pkg prefix override", handle: "h", branch: "b", opts: openOptions{pkg: "mypkg"},
+			session: "mypkg_h", runKey: "mypkg_h", slug: "h",
+			worktree: "~/src/extractor-b", worktreeB: "extractor-b",
+		},
+		{
+			name: "issue suffix", handle: "h", branch: "b", issueNum: "42",
+			session: "mycon_h_42", runKey: "mycon_h_42", slug: "h",
+			worktree: "~/src/extractor-b", worktreeB: "extractor-b",
+		},
+		{
+			name: "benchmark label", handle: "h", branch: "b", opts: openOptions{benchmarkLabel: "fast"},
+			session: "mycon_h_fast", runKey: "mycon_h", slug: "h-fast",
+			worktree: "~/src/extractor-b", worktreeB: "extractor-b",
+		},
+		{
+			name: "hive worker", handle: "h", branch: "b",
+			opts:    openOptions{benchmarkLabel: "fast", hiveRole: hiveRoleWorker, runDir: "/tmp/run"},
+			session: "mycon_h_fast", runKey: "mycon_h", slug: "h-fast",
+			worktree: "/tmp/run/fast", worktreeB: "fast",
+		},
+		{
+			name: "hive coordinator", handle: "h", branch: "b",
+			opts:    openOptions{benchmarkLabel: "fast", hiveRole: hiveRoleCoordinator, runDir: "/tmp/run"},
+			session: "mycon_h_fast_coordinator", runKey: "mycon_h", slug: "h-fast-coordinator",
+			worktree: "/tmp/run", worktreeB: "run",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := planSession(cfg, "mycon", c.handle, c.branch, c.issueNum, c.opts)
+			want := openSessionPlan{
+				sessionName:  c.session,
+				runKey:       c.runKey,
+				slug:         c.slug,
+				worktreeDir:  c.worktree,
+				worktreeBase: c.worktreeB,
+			}
+			if got != want {
+				t.Errorf("got %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestBuildTaskConf(t *testing.T) {
+	cfg := &config.Config{RemoteRepo: "~/src/r", WorktreePrefix: "p", PostSetupCmd: "echo hi", IssueRepo: "org/repo"}
+
+	tc := buildTaskConf(cfg, ModeWorktree, openOptions{}, "b", "", "~/src/r-b")
+	if tc.Branch != "b" || tc.Issue != "" || tc.RunDir != "" || tc.WorktreeDir != "" {
+		t.Errorf("worktree only: got %+v", tc)
+	}
+
+	tc = buildTaskConf(cfg, ModeFullTask, openOptions{}, "b", "42", "~/src/r-b")
+	if tc.Issue != "42" || tc.IssueRepo != "org/repo" {
+		t.Errorf("full task: got %+v", tc)
+	}
+
+	tc = buildTaskConf(cfg, ModeWorktree, openOptions{hiveRole: hiveRoleWorker, runDir: "/tmp/run"}, "b", "", "/tmp/run/fast")
+	if tc.RunDir != "/tmp/run" || tc.WorktreeDir != "/tmp/run/fast" || tc.Branch != "b" {
+		t.Errorf("hive worker: got %+v", tc)
+	}
+
+	tc = buildTaskConf(cfg, ModeWorktree, openOptions{hiveRole: hiveRoleCoordinator, runDir: "/tmp/run"}, "b", "", "/tmp/run")
+	if tc.RunDir != "/tmp/run" || tc.WorktreeDir != "" || tc.Branch != "" {
+		t.Errorf("hive coordinator: got %+v", tc)
+	}
+}
+
+func TestBuildTaskBody(t *testing.T) {
+	cfg := &config.Config{IssueRepo: "org/repo", PlanningContext: "ctx-here"}
+
+	body, err := buildTaskBody(cfg, ModeFullTask, openOptions{extraContext: "extra-here"}, "42")
+	if err != nil {
+		t.Fatalf("full task: %v", err)
+	}
+	for _, want := range []string{"https://github.com/org/repo/issues/42", "extra-here"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("full task body missing %q:\n%s", want, body)
+		}
+	}
+
+	body, err = buildTaskBody(cfg, ModeWorktree, openOptions{extraContext: "extra-here"}, "")
+	if err != nil {
+		t.Fatalf("worktree with context: %v", err)
+	}
+	if !strings.Contains(body, "extra-here") {
+		t.Errorf("worktree body missing extra context:\n%s", body)
+	}
+
+	if body, err = buildTaskBody(cfg, ModeWorktree, openOptions{}, ""); err != nil || body != "" {
+		t.Errorf("worktree without context: got (%q, %v), want empty", body, err)
+	}
+}
+
+func TestSessionPromptFile_BenchmarkDoneMarker(t *testing.T) {
+	slug := "open-test-promptfile"
+	t.Cleanup(func() { os.Remove("/tmp/task-" + slug + ".prompt.md") })
+
+	cfg := &config.Config{} // server "" => local write, so the prompt file is inspectable
+	wrote, err := sessionPromptFile(cfg, openOptions{benchmarkLabel: "fast"}, slug, "body-here")
+	if err != nil {
+		t.Fatalf("sessionPromptFile: %v", err)
+	}
+	if !wrote {
+		t.Fatal("wrote = false, want true")
+	}
+	content, err := os.ReadFile("/tmp/task-" + slug + ".prompt.md")
+	if err != nil {
+		t.Fatalf("read prompt file: %v", err)
+	}
+	for _, want := range []string{"body-here", ".clorchestrate-done"} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf("prompt file missing %q:\n%s", want, content)
+		}
 	}
 }
 
