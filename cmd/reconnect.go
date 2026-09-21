@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -151,6 +152,20 @@ func reconnectRun(args []string, force bool) error {
 			if force {
 				screenAction = "screen -dr"
 			}
+
+			var labels []string
+			for _, c := range e.cfg.Commands {
+				if c.Label != "" {
+					labels = append(labels, c.Label)
+				}
+			}
+
+			type plannedTab struct {
+				sess     screenSession
+				tabColor string
+				runKey   string
+			}
+			var planned []plannedTab
 			for _, sess := range sessions {
 				var matched *matcher
 				for i := range matchers {
@@ -166,24 +181,79 @@ func reconnectRun(args []string, force bool) error {
 					fmt.Fprintf(os.Stderr, "skipping %s (%s) — pass --force to reattach\n", sess.name, sess.state)
 					continue
 				}
+				runKey, _ := runKeyAndLabel(sess.name, labels)
+				planned = append(planned, plannedTab{sess: sess, tabColor: matched.tabColor, runKey: runKey})
+			}
+
+			// Group sibling sessions from the same run so their tabs share a
+			// color and open adjacently, overriding the per-config color.
+			groupOrder := make([]string, 0, len(planned))
+			groups := map[string][]int{}
+			for i, p := range planned {
+				if _, ok := groups[p.runKey]; !ok {
+					groupOrder = append(groupOrder, p.runKey)
+				}
+				groups[p.runKey] = append(groups[p.runKey], i)
+			}
+			for _, runKey := range groupOrder {
+				idxs := groups[runKey]
+				if len(idxs) < 2 {
+					continue
+				}
+				color := config.RunGroupColor(runKey)
+				for _, i := range idxs {
+					planned[i].tabColor = color
+				}
+			}
+			var ordered []plannedTab
+			for _, runKey := range groupOrder {
+				idxs := groups[runKey]
+				sort.SliceStable(idxs, func(i, j int) bool {
+					return planned[idxs[i]].sess.name < planned[idxs[j]].sess.name
+				})
+				for _, i := range idxs {
+					ordered = append(ordered, planned[i])
+				}
+			}
+
+			for _, p := range ordered {
 				var reconnectCmd string
 				if server == "" {
-					reconnectCmd = fmt.Sprintf("%s '%s'", screenAction, sess.name)
+					reconnectCmd = fmt.Sprintf("%s '%s'", screenAction, p.sess.name)
 				} else {
-					reconnectCmd = fmt.Sprintf(`ssh -t %s "%s '%s'"`, server, screenAction, sess.name)
+					reconnectCmd = fmt.Sprintf(`ssh -t %s "%s '%s'"`, server, screenAction, p.sess.name)
 				}
 				if err := iterm.OpenTab(iterm.TabOptions{
-					TabColorHex: matched.tabColor,
-					TabTitle:    sess.name,
+					TabColorHex: p.tabColor,
+					TabTitle:    p.sess.name,
 					RemoteCmd:   reconnectCmd,
 				}); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: could not open tab for session %s: %v\n", sess.name, err)
+					fmt.Fprintf(os.Stderr, "warning: could not open tab for session %s: %v\n", p.sess.name, err)
 				}
 			}
 		}
 	}
 
 	return nil
+}
+
+// runKeyAndLabel strips a trailing "_coordinator" or "_<label>" (for label in
+// labels) suffix from a session name, returning the shared run key and
+// whether a suffix was stripped (i.e. this session is part of a multi-label
+// run rather than a standalone session).
+func runKeyAndLabel(name string, labels []string) (runKey string, grouped bool) {
+	if stripped, ok := strings.CutSuffix(name, "_coordinator"); ok {
+		return stripped, true
+	}
+	for _, label := range labels {
+		if label == "" {
+			continue
+		}
+		if stripped, ok := strings.CutSuffix(name, "_"+label); ok {
+			return stripped, true
+		}
+	}
+	return name, false
 }
 
 func loadAllConfigs() ([]configEntry, error) {

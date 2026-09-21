@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
 
@@ -127,5 +128,21 @@ server = "myserver"
 	}
 	if cfg.Server != "myserver" {
 		t.Errorf("Server = %q", cfg.Server)
+	}
+}
+
+func TestRunGroupColor(t *testing.T) {
+	c1 := RunGroupColor("myconfig_task123")
+	c2 := RunGroupColor("myconfig_task123")
+	if c1 != c2 {
+		t.Errorf("RunGroupColor not deterministic: %q != %q", c1, c2)
+	}
+	if matched, _ := regexp.MatchString(`^#[0-9a-f]{6}$`, c1); !matched {
+		t.Errorf("RunGroupColor returned invalid hex: %q", c1)
+	}
+
+	c3 := RunGroupColor("myconfig_task456")
+	if c1 == c3 {
+		t.Logf("RunGroupColor: task123 and task456 both mapped to %q (hash collision, not a bug)", c1)
 	}
 }

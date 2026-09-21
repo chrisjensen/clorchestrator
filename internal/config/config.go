@@ -39,6 +39,74 @@ func ResolveTabColor(rawValue, configPath string) string {
 	return defaultTabColors[h.Sum32()%uint32(len(defaultTabColors))]
 }
 
+// RunGroupColor returns a deterministic color for a run key, chosen from the
+// full hue spectrum (not the small defaultTabColors palette) so that
+// sibling runs reconnected together are visually distinguishable from one
+// another.
+func RunGroupColor(runKey string) string {
+	h := fnv.New64a()
+	h.Write([]byte(runKey))
+	hue := float64(avalanche(h.Sum64()) % 360)
+	return hslToHex(hue, 0.65, 0.50)
+}
+
+// avalanche is the murmur3 fmix64 finalizer. FNV-1a doesn't spread bits well
+// for short inputs that differ only in their last byte (e.g. run keys ending
+// in an incrementing issue number), which clustered hues by parity — this
+// remixes the hash so nearby inputs produce well-distributed hues.
+func avalanche(x uint64) uint64 {
+	x ^= x >> 33
+	x *= 0xff51afd7ed558ccd
+	x ^= x >> 33
+	x *= 0xc4ceb9fe1a85ec53
+	x ^= x >> 33
+	return x
+}
+
+// hslToHex converts an HSL color (h in degrees [0,360), s and l in [0,1]) to
+// a "#RRGGBB" hex string.
+func hslToHex(h, s, l float64) string {
+	c := (1 - abs(2*l-1)) * s
+	x := c * (1 - abs(mod(h/60, 2)-1))
+	m := l - c/2
+
+	var r, g, b float64
+	switch {
+	case h < 60:
+		r, g, b = c, x, 0
+	case h < 120:
+		r, g, b = x, c, 0
+	case h < 180:
+		r, g, b = 0, c, x
+	case h < 240:
+		r, g, b = 0, x, c
+	case h < 300:
+		r, g, b = x, 0, c
+	default:
+		r, g, b = c, 0, x
+	}
+
+	toByte := func(v float64) uint8 {
+		return uint8((v + m) * 255)
+	}
+	return fmt.Sprintf("#%02x%02x%02x", toByte(r), toByte(g), toByte(b))
+}
+
+func abs(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func mod(a, b float64) float64 {
+	m := a - b*float64(int(a/b))
+	if m < 0 {
+		m += b
+	}
+	return m
+}
+
 // Command describes a named command for launching a Claude session.
 // The entry with Default=true (or the first entry if none is marked) is used
 // for all normal sessions. All entries are available for --benchmark runs.
