@@ -17,9 +17,9 @@ var evalTmpl string
 type PromptData struct {
 	PlanningContext string
 	// Issue mode
-	IssueNum  string
-	IssueRepo string
-	IssueURL  string
+	IssueNum     string
+	IssueRepo    string
+	IssueURL     string
 	ExtraContext string
 	// Task mode
 	Description string

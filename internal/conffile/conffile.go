@@ -56,7 +56,7 @@ func Render(c TaskConf) string {
 }
 
 // shellQuote wraps s in single quotes, escaping any embedded single quotes
-// using the standard bash pattern: 'it'\''s'
+// using the standard bash pattern: 'it'\”s'
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
